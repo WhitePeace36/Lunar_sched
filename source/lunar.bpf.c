@@ -1,0 +1,411 @@
+// SPDX-License-Identifier: GPL-2.0
+//
+// Author: Timon Stipkovits <timon2201@gmail.com>
+//
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+#include <include/scx/common.bpf.h>
+#include "defines.h"
+#include "helpers.h"
+#include "datatypes.h"
+#include "dispatches.h"
+
+char _license[] SEC("license") = "GPL";
+
+UEI_DEFINE(uei);
+
+static __always_inline u64 dispatch_with_fallback(
+  u32 cpu,
+  struct dispatch_ctx* ctx)
+{
+  switch (schedulerMode)
+  {
+    case SCHED_MODE_DSQ_PER_LLC:
+    {
+      u32 llc = cpu_llc_id(cpu);
+      return dispatch_dsq_per_llc(llc, ctx);
+      break;
+    }
+
+    case SCHED_MODE_DSQ_PER_CPU:
+      return dispatch_dsq_per_cpu(cpu, ctx);
+      break;
+  }
+
+  return DSQ_TYPE_EMPTY;
+}
+
+static __always_inline void update_task_dsq_type(
+  struct task_struct* task,
+  struct task_ctx* task_ctx,
+  struct dispatch_ctx* dispatch_ctx)
+{
+  if (!is_kthread(task) && isSpammer(task_ctx))
+  {
+    task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
+    return;
+  }
+
+  switch (task_ctx->current_dsq_type)
+  {
+    case DSQ_TYPE_LC:
+      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= ((RUNTIME_PRIO_BOUNDARY_LC + (RUNTIME_PRIO_BOUNDARY_LC * RUNTIME_THRESH_PERCENT) / 100))) ||
+          task_ctx->vlag < VLAG_DEMOTE_THRESH)
+      {
+        task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
+      }
+      break;
+    case DSQ_TYPE_INTERACTIVE:
+      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_LC)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      {
+        task_ctx->current_dsq_type = DSQ_TYPE_LC;
+      }
+      else if ((task_ctx->first_runtime_avg_sample_taken &&
+                task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE + ((RUNTIME_PRIO_BOUNDARY_INTERACTIVE * RUNTIME_THRESH_PERCENT) / 100))) ||
+               task_ctx->vlag < VLAG_DEMOTE_THRESH)
+      {
+        task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
+      }
+      break;
+    case DSQ_TYPE_NORMAL:
+      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      {
+        task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
+      }
+      else if ((task_ctx->first_runtime_avg_sample_taken &&
+                task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_NORMAL + ((RUNTIME_PRIO_BOUNDARY_NORMAL * RUNTIME_THRESH_PERCENT) / 100))) ||
+               task_ctx->vlag < VLAG_DEMOTE_THRESH)
+      {
+        task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
+      }
+      break;
+    case DSQ_TYPE_BATCH:
+      if (task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_NORMAL) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      {
+        task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
+      }
+      break;
+    case DSQ_TYPE_GREEDY:
+      if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= RUNTIME_PRIO_BOUNDARY_BATCH) ||
+           (!task_ctx->first_runtime_avg_sample_taken && task_ctx->current_runtime <= RUNTIME_PRIO_BOUNDARY_BATCH)) &&
+          task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      {
+        task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
+      }
+      break;
+  }
+  if (task_ctx->current_dsq_type != DSQ_TYPE_SOFT && task_ctx->current_dsq_type != DSQ_TYPE_GREEDY)
+  {
+    if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100)) ||
+         (!task_ctx->first_runtime_avg_sample_taken &&
+          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) &&
+        task_ctx->vlag < VLAG_DEMOTE_THRESH)
+    {
+      task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
+    }
+  }
+}
+
+static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, struct dispatch_ctx* dispatch_ctx, u64 used_ns, bool runnable)
+{
+  if (!task_ctx)
+  {
+    return;
+  }
+
+  task_ctx->current_runtime += used_ns;
+  if (task_ctx->current_runtime > MAX_RUNTIME_PER_TASK)
+  {
+    task_ctx->current_runtime = MAX_RUNTIME_PER_TASK;
+  }
+
+  if ((task_ctx->current_runtime / task_ctx->runtime_avg) > AVG_RUNTIME_OVERRIDE_FACTOR)
+  {
+    task_ctx->runtime_avg = task_ctx->current_runtime;
+  }
+  if (!runnable)
+  {
+    if (!task_ctx->first_runtime_avg_sample_taken)
+    {
+      task_ctx->runtime_avg = task_ctx->current_runtime;
+    }
+    else
+    {
+      task_ctx->runtime_avg = (task_ctx->runtime_avg * (HISTORIC_TASK_SAMPLES - 1) + task_ctx->current_runtime) / HISTORIC_TASK_SAMPLES;
+    }
+
+    task_ctx->current_runtime = 0;
+    task_ctx->first_runtime_avg_sample_taken = true;
+  }
+  if (task_ctx->runtime_avg < MIN_AVG_RUNTIME)
+  {
+    task_ctx->runtime_avg = MIN_AVG_RUNTIME;
+  }
+
+  update_task_dsq_type(task, task_ctx, dispatch_ctx);
+}
+
+// callbacks
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
+{
+  s32 ret;
+
+  u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+  u32 cpu;
+  bpf_for(cpu, 0, nr_cpu_ids)
+  {
+    u32 key = 0;
+    struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
+    if (!dispatch_ctx)
+      return -EINVAL;
+
+    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_SOFT + cpu, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_LC + cpu, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_NORMAL + cpu, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_BATCH + cpu, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_GREEDY + cpu, -1);
+    if (ret)
+      return ret;
+  }
+  u32 llc;
+  bpf_for(llc, 0, nr_llcs)
+  {
+    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_SOFT + llc, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_LC + llc, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_NORMAL + llc, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_BATCH + llc, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc, -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_GREEDY + llc, -1);
+    if (ret)
+      return ret;
+  }
+
+  return 0;
+}
+
+s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_args* args)
+{
+  u64 now = bpf_ktime_get_ns();
+  struct task_ctx context_temp = {.runtime_avg = AVG_RUNTIME_START,
+                                  .current_runtime = 0,
+                                  .current_dsq_type = DSQ_TYPE_BATCH,
+                                  .vlag = 0,
+                                  .last_yield_timestamp = now,
+                                  .first_runtime_avg_sample_taken = false,
+                                  .last_spawn_timestamp = now,
+                                  .task_spawn_interval_avg = 0};
+
+  u32 pid = p->pid;
+  long ret = bpf_map_update_elem(&task_ctx_map, &pid, &context_temp, BPF_ANY);
+  if (ret)
+  {
+    return ret;
+  }
+
+  struct task_ctx* context = get_task_ctx(p);
+  if (!context)
+  {
+    return 0;
+  }
+  if (args && args->fork)
+  {
+    struct task_struct* spawner;
+    if (p->pid != p->tgid)
+      spawner = p->group_leader;
+    else
+      spawner = p->real_parent;
+
+    if (spawner)
+    {
+      struct task_ctx* pctx = get_task_ctx(spawner);
+      if (pctx)
+      {
+        u64 now = bpf_ktime_get_ns();
+        u64 last = __sync_lock_test_and_set(&pctx->last_spawn_timestamp, now);
+
+        if (last)
+        {
+          u64 interval = now - last;
+          if (!pctx->task_spawn_interval_avg)
+            pctx->task_spawn_interval_avg = interval;
+          else
+            pctx->task_spawn_interval_avg = (pctx->task_spawn_interval_avg * (HISTORIC_SPAWN_SAMPLES - 1) + interval) / HISTORIC_SPAWN_SAMPLES;
+        }
+      }
+      if (!is_kthread(p) && isSpammer(pctx))
+      {
+        context->current_dsq_type = DSQ_TYPE_GREEDY;
+        context->task_spawn_interval_avg = pctx->task_spawn_interval_avg;
+        context->last_spawn_timestamp = pctx->last_spawn_timestamp;
+      }
+    }
+  }
+
+  return ret;
+}
+
+void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args)
+{
+  u32 pid = p->pid;
+  bpf_map_delete_elem(&task_ctx_map, &pid);
+}
+
+s32 BPF_STRUCT_OPS(
+  lunar_select_cpu,
+  struct task_struct* p,
+  s32 prev_cpu,
+  u64 wake_flags)
+{
+  struct task_ctx* context = get_task_ctx(p);
+  if (!context)
+    return prev_cpu;
+
+  bool isIdle;
+  u32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &isIdle);
+
+  if (isIdle && (context->current_dsq_type != DSQ_TYPE_GREEDY || !context->first_runtime_avg_sample_taken) && !isSpammer(context))
+  {
+    creditVlag(context);
+    u64 slice = get_dsq_task_slice(context->current_dsq_type);
+    context->last_run_granted_slice = slice;
+    scx_bpf_dsq_insert(p, DEFAULT_DSQ_LOCAL_ON | cpu, slice, 0);
+  }
+  return cpu;
+}
+
+void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
+{
+  struct task_ctx* context = get_task_ctx(p);
+  if (!context)
+    return;
+
+  u32 key = 0;
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, bpf_get_smp_processor_id());
+  if (!dispatch_ctx)
+    return;
+
+  if (enq_flags & SCX_ENQ_WAKEUP)
+  {
+    if (is_high_prio_kthread_task(p))
+    {
+      context->current_dsq_type = DSQ_TYPE_SOFT;
+    }
+
+    creditVlag(context);
+  }
+
+  u64 dsqType = context ? context->current_dsq_type : QUEUE_START;
+  u32 cpu = scx_bpf_task_cpu(p);
+  u64 dsq;
+  if (schedulerMode == SCHED_MODE_DSQ_PER_LLC)
+  {
+    u32 llc = cpu_llc_id(cpu);
+    dsq = get_llc_dsq_from_type(dsqType, llc);
+  }
+  else
+  {
+    dsq = get_cpu_dsq_from_type(dsqType, cpu);
+  }
+  u64 slice = get_dsq_task_slice(dsqType);
+  context->last_run_granted_slice = slice;
+  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
+}
+
+void BPF_STRUCT_OPS(
+  lunar_dispatch,
+  s32 cpu,
+  struct task_struct* prev)
+{
+  u32 key = 0;
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
+  if (!dispatch_ctx)
+    return;
+
+  dispatch_with_fallback(cpu, dispatch_ctx);
+}
+
+void BPF_STRUCT_OPS(
+  lunar_stopping,
+  struct task_struct* task,
+  bool runnable)
+{
+  if (!task)
+  {
+    return;
+  }
+  struct task_ctx* tctx = get_task_ctx(task);
+  if (!tctx)
+    return;
+
+  u32 key = 0;
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, bpf_get_smp_processor_id());
+  if (!dispatch_ctx)
+    return;
+
+  u64 task_slice = tctx->last_run_granted_slice;
+  u64 remaining = task->scx.slice;
+
+  u64 used_ns = (remaining >= task_slice) ? 0 : (task_slice - remaining);
+
+  tctx->vlag -= (s64)used_ns;
+  if (tctx->vlag < VLAG_MIN)
+    tctx->vlag = VLAG_MIN;
+
+  if (!runnable)
+  {
+    tctx->last_yield_timestamp = bpf_ktime_get_ns();
+  }
+
+  u64 current_dsq = tctx->current_dsq_type;
+  u64 dsqIndex;
+  bpf_for(dsqIndex, DSQ_TYPE_SOFT, DSQ_TYPE_GREEDY) /* LC..BATCH */
+  {
+    if (dsqIndex >= current_dsq)
+      dispatch_ctx->runtime_per_queue[dsqIndex] += used_ns;
+    else
+      dispatch_ctx->runtime_per_queue[dsqIndex] = 0;
+  }
+
+  update_task_prio(task, tctx, dispatch_ctx, used_ns, runnable);
+}
+
+void BPF_STRUCT_OPS(
+  lunar_exit,
+  struct scx_exit_info* ei)
+{
+  UEI_RECORD(uei, ei);
+}
+
+SCX_OPS_DEFINE(lunar_ops,
+               .init = (void*)lunar_init,
+               .init_task = (void*)lunar_init_task,
+               .exit_task = (void*)lunar_exit_task,
+               .select_cpu = (void*)lunar_select_cpu,
+               .enqueue = (void*)lunar_enqueue,
+               .dispatch = (void*)lunar_dispatch,
+               .stopping = (void*)lunar_stopping,
+                .exit = (void*)lunar_exit,
+               .name = "scx_lunar");
