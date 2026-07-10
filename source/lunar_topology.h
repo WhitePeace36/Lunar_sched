@@ -229,6 +229,9 @@ bool setup_lunar_topology(Skel* skel, const std::filesystem::path& cpu_root = "/
   }
 
   skel->rodata->nr_llcs = topo->nr_llcs;
+
+  std::cout << "Numer of found llcs: " << topo->nr_llcs << std::endl;
+
   for (std::uint32_t cpu = 0; cpu < topo->nr_cpu_ids; ++cpu)
   {
     skel->rodata->cpu_to_llc[cpu] = topo->cpu_to_llc[cpu];
