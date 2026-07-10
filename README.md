@@ -11,7 +11,7 @@ Which exactly fulfills this requirements.
 ## Dependencies
 
 ```
-cmake clang bpftool pkgconf libbpf
+cmake clang pkgconf libbpf bpf
 ```
 
 kernel compiled with flag `CONFIG_DEBUG_INFO_BTF=y`
