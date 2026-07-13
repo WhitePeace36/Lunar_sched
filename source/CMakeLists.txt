@@ -18,7 +18,7 @@ set(BPF_SKEL
 add_custom_command(
     OUTPUT ${BPF_OBJ}
     COMMAND ${CLANG_EXECUTABLE}
-        -target bpf -g -O2 -mcpu=v3 -D__TARGET_ARCH_${BPF_TARGET_ARCH}
+        -target bpf -g -O2 -Wall -Wno-compare-distinct-pointer-types -mcpu=v3 -D__TARGET_ARCH_${BPF_TARGET_ARCH} -mlittle-endian -idirafter
         -I${SCX_INCLUDE}
         -I${CMAKE_CURRENT_SOURCE_DIR}
         -I${CMAKE_SOURCE_DIR}
@@ -73,9 +73,11 @@ target_include_directories(lunar PRIVATE
 target_link_libraries(lunar PRIVATE ${LIBBPF_LIBRARIES})
 
 target_compile_options(lunar PRIVATE
-    -Wall -Wextra -Wpedantic -fno-strict-aliasing -fwrapv
+    -Wall -Wextra -Wpedantic -Wno-overlength-strings -fno-strict-aliasing -fwrapv -O3 -flto=thin -march=native
 )
-
+target_link_options(lunar PRIVATE
+    -flto=thin -fuse-ld=lld -march=native
+)
 
 set_target_properties(lunar PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
