@@ -99,8 +99,8 @@ static __always_inline void update_task_dsq_type(
   {
     if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100)) ||
          (!task_ctx->first_runtime_avg_sample_taken &&
-          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) &&
-        task_ctx->vlag < VLAG_DEMOTE_THRESH)
+          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) /*&&
+        task_ctx->vlag < VLAG_DEMOTE_THRESH*/)
     {
       task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
     }
