@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <signal.h>
 #include <atomic>
+#include <thread>
 
 enum scheduler_mode : std::uint32_t
 {
@@ -33,10 +34,7 @@ typedef int8_t s8;
 using namespace std;
 
 #include <include/scx/user_exit_info_common.h>
-extern "C"
-{
 #include <source/lunar.skel.h>
-}
 
 std::atomic<bool> stop{};
 
@@ -103,7 +101,7 @@ int main(int argc, const char** argv)
 
   while (!stop)
   {
-    sleep(1);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   std::cout << "Shutting down and restoring default kernel scheduler..." << std::endl;

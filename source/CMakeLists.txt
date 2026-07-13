@@ -1,6 +1,19 @@
-set(BPF_SRC  ${CMAKE_CURRENT_SOURCE_DIR}/lunar.bpf.c)
-set(BPF_OBJ  ${CMAKE_CURRENT_BINARY_DIR}/lunar.bpf.o)
-set(BPF_SKEL ${CMAKE_CURRENT_BINARY_DIR}/lunar.skel.h)
+set(BPF_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/lunar.bpf.c
+)
+set(BPF_HEADER
+    ${CMAKE_CURRENT_SOURCE_DIR}/defines.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/datatypes.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/helpers.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/dispatches.h
+)
+
+set(BPF_OBJ
+    ${CMAKE_CURRENT_BINARY_DIR}/lunar.bpf.o
+)
+set(BPF_SKEL
+    ${CMAKE_CURRENT_BINARY_DIR}/lunar.skel.h
+)
 
 add_custom_command(
     OUTPUT ${BPF_OBJ}
@@ -12,6 +25,7 @@ add_custom_command(
         ${LIBBPF_CFLAGS_OTHER}
         -c ${BPF_SRC} -o ${BPF_OBJ}
     DEPENDS ${BPF_SRC}
+            ${BPF_HEADER}
     COMMENT "Compiling BPF scheduler"
     VERBATIM
 )
@@ -44,8 +58,8 @@ set_target_properties(lunar_bpf PROPERTIES
 add_executable(lunar
     ${lunarSource}
     ${lunarHeader}
-
 )
+
 add_dependencies(lunar lunar_bpf)
 
 target_include_directories(lunar PRIVATE
