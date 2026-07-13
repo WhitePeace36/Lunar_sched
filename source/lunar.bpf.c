@@ -99,8 +99,8 @@ static __always_inline void update_task_dsq_type(
   {
     if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100)) ||
          (!task_ctx->first_runtime_avg_sample_taken &&
-          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) /*&&
-        task_ctx->vlag < VLAG_DEMOTE_THRESH*/)
+          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) &&
+        task_ctx->vlag < VLAG_DEMOTE_THRESH)
     {
       task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
     }
@@ -212,7 +212,7 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
   struct task_ctx context_temp = {.runtime_avg = AVG_RUNTIME_START,
                                   .current_runtime = 0,
                                   .current_dsq_type = DSQ_TYPE_BATCH,
-                                  .vlag = 0,
+                                  .vlag = 200 * NS_PER_US,
                                   .last_yield_timestamp = now,
                                   .first_runtime_avg_sample_taken = false,
                                   .last_spawn_timestamp = now,
