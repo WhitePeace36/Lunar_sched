@@ -41,13 +41,13 @@ or
 ./build.sh
 ```
 
-## Intalling
+## Installing
 
 ```
 sudo ./install.sh
 ```
 
-## Unintalling
+## Uninstalling
 
 ```
 sudo ./uninstall.sh
