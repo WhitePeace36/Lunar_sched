@@ -47,6 +47,12 @@ static __always_inline void update_task_dsq_type(
     return;
   }
 
+  if (!is_kthread(task) && task_ctx->current_dsq_type > SUBTREE_OVERRIDE_PROTECT_MAX_TIER && isSubtreeHog(task_ctx, bpf_ktime_get_ns()))
+  {
+    task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
+    return;
+  }
+
   switch (task_ctx->current_dsq_type)
   {
     case DSQ_TYPE_LC:
@@ -216,7 +222,9 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
                                   .last_yield_timestamp = now,
                                   .first_runtime_avg_sample_taken = false,
                                   .last_spawn_timestamp = now,
-                                  .task_spawn_interval_avg = 0};
+                                  .task_spawn_interval_avg = 0,
+                                  .subtree_cost = 0,
+                                  .last_subtree_decay = now};
 
   u32 pid = p->pid;
   long ret = bpf_map_update_elem(&task_ctx_map, &pid, &context_temp, BPF_ANY);
@@ -232,12 +240,7 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
   }
   if (args && args->fork)
   {
-    struct task_struct* spawner;
-    if (p->pid != p->tgid)
-      spawner = p->group_leader;
-    else
-      spawner = p->real_parent;
-
+    struct task_struct* spawner = get_spawner(context);
     if (spawner)
     {
       struct task_ctx* pctx = get_task_ctx(spawner);
@@ -260,6 +263,10 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
         context->current_dsq_type = DSQ_TYPE_GREEDY;
         context->task_spawn_interval_avg = pctx->task_spawn_interval_avg;
         context->last_spawn_timestamp = pctx->last_spawn_timestamp;
+      }
+      if (!is_kthread(p) && isSubtreeHog(pctx, now))
+      {
+        context->current_dsq_type = DSQ_TYPE_GREEDY;
       }
     }
   }
@@ -374,6 +381,8 @@ void BPF_STRUCT_OPS(
   if (tctx->vlag < VLAG_MIN)
     tctx->vlag = VLAG_MIN;
 
+  fold_subtree_cost(task, tctx, used_ns, bpf_ktime_get_ns());
+
   if (!runnable)
   {
     tctx->last_yield_timestamp = bpf_ktime_get_ns();
@@ -407,5 +416,5 @@ SCX_OPS_DEFINE(lunar_ops,
                .enqueue = (void*)lunar_enqueue,
                .dispatch = (void*)lunar_dispatch,
                .stopping = (void*)lunar_stopping,
-                .exit = (void*)lunar_exit,
+               .exit = (void*)lunar_exit,
                .name = "scx_lunar");

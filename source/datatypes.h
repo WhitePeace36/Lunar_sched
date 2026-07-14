@@ -26,6 +26,9 @@ struct task_ctx
   u64 last_spawn_timestamp;
   u64 task_spawn_interval_avg;
   u64 last_run_granted_slice;
+  struct bpf_spin_lock lock;
+  u64 subtree_cost;
+  u64 last_subtree_decay;
 };
 
 struct dispatch_ctx

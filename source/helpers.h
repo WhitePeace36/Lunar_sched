@@ -122,4 +122,77 @@ static __always_inline void creditVlag(struct task_ctx* context)
     context->vlag = VLAG_MAX;
 }
 
+static __always_inline struct task_struct* get_spawner(
+  struct task_struct* p)
+{
+  if (p->pid != p->tgid)
+    return p->group_leader;
+  return p->real_parent;
+}
+
+static __always_inline u64 subtree_cost_view(
+  struct task_ctx* c,
+  u64 now)
+{
+  u64 cost = c->subtree_cost;
+  u64 last = c->last_subtree_decay;
+  if (last && now > last)
+  {
+    u32 steps = (u32)((now - last) / SUBTREE_DECAY_HALFLIFE);
+    if (steps > SUBTREE_DECAY_MAX_STEPS)
+      steps = SUBTREE_DECAY_MAX_STEPS;
+    cost >>= steps;
+  }
+  return cost;
+}
+
+static __always_inline bool isSubtreeHog(
+  struct task_ctx* c,
+  u64 now)
+{
+  if (!c)
+    return false;
+  return subtree_cost_view(c, now) > SUBTREE_COST_GREEDY_THRESH;
+}
+
+static __always_inline void fold_subtree_cost(
+  struct task_struct* child,
+  struct task_ctx* child_ctx,
+  u64 used_ns,
+  u64 now)
+{
+  if (!child_ctx || !used_ns || is_kthread(child))
+    return;
+  if (child_ctx->vlag >= 0) /* only hot descendants */
+    return;
+
+  struct task_struct* spawner = get_spawner(child);
+  if (!spawner || spawner == child || is_kthread(spawner) || spawner->pid <= 1)
+    return;
+
+  struct task_ctx* sctx = get_task_ctx(spawner);
+  if (!sctx)
+    return;
+
+  bpf_spin_lock(&sctx->lock);
+  u64 last = sctx->last_subtree_decay;
+  if (!last)
+  {
+    sctx->last_subtree_decay = now;
+  }
+  else if (now > last)
+  {
+    u64 steps = (now - last) / SUBTREE_DECAY_HALFLIFE;
+    if (steps)
+    {
+      if (steps > SUBTREE_DECAY_MAX_STEPS)
+        steps = SUBTREE_DECAY_MAX_STEPS;
+      sctx->subtree_cost >>= steps;
+      sctx->last_subtree_decay = now;
+    }
+  }
+  sctx->subtree_cost += used_ns;
+  bpf_spin_unlock(&sctx->lock);
+}
+
 #endif  // HELPERS_H
