@@ -103,6 +103,20 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
 //   return task->task_spawn_interval_avg && task->task_spawn_interval_avg < TASK_SPAWN_AVG_THRESH && wasLastSpawnInThreshold < TASK_LAST_SPAWN_THRESH;
 // }
 
+static __always_inline u64 subtree_cost_view(struct task_ctx* c, u64 now)
+{
+  u64 cost = c->subtree_cost;
+  u64 last = c->last_subtree_decay;
+  if (last && now > last)
+  {
+    u32 steps = (u32)((now - last) / SUBTREE_DECAY_HALFLIFE);
+    if (steps > SUBTREE_DECAY_MAX_STEPS)
+      steps = SUBTREE_DECAY_MAX_STEPS;
+    cost >>= steps;
+  }
+  return cost;
+}
+
 static __always_inline void creditVlag(struct task_ctx* context)
 {
   if (!context)
@@ -118,6 +132,9 @@ static __always_inline void creditVlag(struct task_ctx* context)
 
   context->vlag += credit;
 
+  bpf_printk("lunar_run cpu=%d dsq=%llu vlag=%lld avg=%llu subtree=%llu slice=%llu. Credited: %ll", bpf_get_smp_processor_id(), context->current_dsq_type, context->vlag,
+             context->runtime_avg, subtree_cost_view(context, now), context->last_run_granted_slice, credit);
+
   if (context->vlag > VLAG_MAX)
     context->vlag = VLAG_MAX;
 }
@@ -128,22 +145,6 @@ static __always_inline struct task_struct* get_spawner(
   if (p->pid != p->tgid)
     return p->group_leader;
   return p->real_parent;
-}
-
-static __always_inline u64 subtree_cost_view(
-  struct task_ctx* c,
-  u64 now)
-{
-  u64 cost = c->subtree_cost;
-  u64 last = c->last_subtree_decay;
-  if (last && now > last)
-  {
-    u32 steps = (u32)((now - last) / SUBTREE_DECAY_HALFLIFE);
-    if (steps > SUBTREE_DECAY_MAX_STEPS)
-      steps = SUBTREE_DECAY_MAX_STEPS;
-    cost >>= steps;
-  }
-  return cost;
 }
 
 static __always_inline bool isSubtreeHog(

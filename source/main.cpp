@@ -33,7 +33,10 @@ typedef int8_t s8;
 
 using namespace std;
 
+#include <include/scx/common.h>
+#include <include/scx/enums.h>
 #include <include/scx/user_exit_info_common.h>
+#include <include/scx/enums.autogen.h>
 #include <source/lunar.skel.h>
 
 std::atomic<bool> stop{};
@@ -64,7 +67,7 @@ int main(int argc, const char** argv)
     std::cerr << "Failed to create BPF skeleton." << std::endl;
     return 1;
   }
-
+  SCX_ENUM_INIT(skel);
   skel->rodata->schedulerMode = mode;
 
   if (!setup_lunar_topology(skel))

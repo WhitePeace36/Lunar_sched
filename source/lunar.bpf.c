@@ -238,22 +238,22 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
     if (spawner)
     {
       struct task_ctx* pctx = get_task_ctx(spawner);
-      if (pctx)
-      {
-        // bpf_spin_lock(&pctx->lock);
-        // u64 last = pctx->last_spawn_timestamp;
-        // pctx->last_spawn_timestamp = now;
-        // if (last)
-        // {
-        //   u64 interval = now - last;
-        //   if (!pctx->task_spawn_interval_avg)
-        //     pctx->task_spawn_interval_avg = interval;
-        //   else
-        //     pctx->task_spawn_interval_avg = (pctx->task_spawn_interval_avg * (HISTORIC_SPAWN_SAMPLES - 1) + interval) / HISTORIC_SPAWN_SAMPLES;
-        // }
-        // bpf_spin_unlock(&pctx->lock);
-      }
-      /*      if (!is_kthread(p) && isSpammer(pctx))
+      /*      if (pctx)
+            {
+              bpf_spin_lock(&pctx->lock);
+              u64 last = pctx->last_spawn_timestamp;
+              pctx->last_spawn_timestamp = now;
+              if (last)
+              {
+                u64 interval = now - last;
+                if (!pctx->task_spawn_interval_avg)
+                  pctx->task_spawn_interval_avg = interval;
+                else
+                  pctx->task_spawn_interval_avg = (pctx->task_spawn_interval_avg * (HISTORIC_SPAWN_SAMPLES - 1) + interval) / HISTORIC_SPAWN_SAMPLES;
+              }
+              bpf_spin_unlock(&pctx->lock);
+            }
+            if (!is_kthread(p) && isSpammer(pctx))
             {
               context->current_dsq_type = DSQ_TYPE_GREEDY;
               context->task_spawn_interval_avg = pctx->task_spawn_interval_avg;
@@ -316,9 +316,13 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
     {
       context->current_dsq_type = DSQ_TYPE_SOFT;
     }
-
+    // bpf_printk("CREDITED CALLED");
     creditVlag(context);
   }
+  // else
+  // {
+  //   bpf_printk("NOT CREDITED enqflags: %llu", enq_flags);
+  // }
 
   u64 dsqType = context ? context->current_dsq_type : QUEUE_START;
   u32 cpu = scx_bpf_task_cpu(p);
@@ -355,6 +359,7 @@ void BPF_STRUCT_OPS(
   struct task_struct* task,
   bool runnable)
 {
+  u64 now = bpf_ktime_get_ns();
   if (!task)
   {
     return;
@@ -377,11 +382,11 @@ void BPF_STRUCT_OPS(
   if (tctx->vlag < VLAG_MIN)
     tctx->vlag = VLAG_MIN;
 
-  fold_subtree_cost(task, tctx, used_ns, bpf_ktime_get_ns());
+  fold_subtree_cost(task, tctx, used_ns, now);
 
   if (!runnable)
   {
-    tctx->last_yield_timestamp = bpf_ktime_get_ns();
+    tctx->last_yield_timestamp = now;
   }
 
   u64 current_dsq = tctx->current_dsq_type;
@@ -404,11 +409,32 @@ void BPF_STRUCT_OPS(
   UEI_RECORD(uei, ei);
 }
 
+// void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
+// {
+//   if (!p)
+//     return;
+
+//   struct task_ctx* tctx = get_task_ctx(p);
+//   if (!tctx)
+//     return;
+
+//   /* Cut the noise: uncomment to skip kernel threads, or gate on comm. */
+//   // if (is_kthread(p))
+//   //   return;
+
+//   u64 now = bpf_ktime_get_ns();
+
+//   // bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu vlag=%lld avg=%llu subtree=%llu slice=%llu", bpf_get_smp_processor_id(), p->pid, p->comm, tctx->current_dsq_type,
+//   // tctx->vlag,
+//   //            tctx->runtime_avg, subtree_cost_view(tctx, now), tctx->last_run_granted_slice);
+// }
+
 SCX_OPS_DEFINE(lunar_ops,
                .init = (void*)lunar_init,
                .init_task = (void*)lunar_init_task,
                .exit_task = (void*)lunar_exit_task,
                .select_cpu = (void*)lunar_select_cpu,
+               //.running = (void*)lunar_running,
                .enqueue = (void*)lunar_enqueue,
                .dispatch = (void*)lunar_dispatch,
                .stopping = (void*)lunar_stopping,
