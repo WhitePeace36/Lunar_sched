@@ -64,10 +64,10 @@
 #define DSQ_TYPE_EMPTY 7
 #define DSQ_PRIO_QUEUE_AMOUNT 6
 
-#define SUBTREE_DECAY_HALFLIFE (8 * NS_PER_MS)                 /* cost halves every 8ms of wall time */
-#define SUBTREE_DECAY_MAX_STEPS 16                             /* clamp: >16 halvings == effectively 0 */
-#define SUBTREE_COST_GREEDY_THRESH (32 * NS_PER_MS)            /* demote spawner past this decayed cost */
-#define SUBTREE_OVERRIDE_PROTECT_MAX_TIER DSQ_TYPE_SOFT        /* never subtree-demote <= this */
+#define SUBTREE_DECAY_HALFLIFE (8 * NS_PER_MS)          /* cost halves every 8ms of wall time */
+#define SUBTREE_DECAY_MAX_STEPS 16                      /* clamp: >16 halvings == effectively 0 */
+#define SUBTREE_COST_GREEDY_THRESH (24 * NS_PER_MS)     /* demote spawner past this decayed cost */
+#define SUBTREE_OVERRIDE_PROTECT_MAX_TIER DSQ_TYPE_SOFT /* never subtree-demote <= this */
 
 #define VLAG_PROMOTE_THRESH 4000000LL
 #define VLAG_DEMOTE_THRESH -4000000LL
