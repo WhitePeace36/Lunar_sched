@@ -41,7 +41,7 @@ static __always_inline void update_task_dsq_type(
   struct task_ctx* task_ctx,
   struct dispatch_ctx* dispatch_ctx)
 {
-  if (!is_kthread(task) && (isSpammer(task_ctx) || (task_ctx->current_dsq_type > SUBTREE_OVERRIDE_PROTECT_MAX_TIER && isSubtreeHog(task_ctx, bpf_ktime_get_ns()))))
+  if (!is_kthread(task) && (/*isSpammer(task_ctx) ||*/ (task_ctx->current_dsq_type > SUBTREE_OVERRIDE_PROTECT_MAX_TIER && isSubtreeHog(task_ctx, bpf_ktime_get_ns()))))
   {
     task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
     return;
@@ -240,24 +240,29 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
       struct task_ctx* pctx = get_task_ctx(spawner);
       if (pctx)
       {
-        bpf_spin_lock(&pctx->lock);
-        u64 last = pctx->last_spawn_timestamp;
-        pctx->last_spawn_timestamp = now;
-        if (last)
-        {
-          u64 interval = now - last;
-          if (!pctx->task_spawn_interval_avg)
-            pctx->task_spawn_interval_avg = interval;
-          else
-            pctx->task_spawn_interval_avg = (pctx->task_spawn_interval_avg * (HISTORIC_SPAWN_SAMPLES - 1) + interval) / HISTORIC_SPAWN_SAMPLES;
-        }
-        bpf_spin_unlock(&pctx->lock);
+        // bpf_spin_lock(&pctx->lock);
+        // u64 last = pctx->last_spawn_timestamp;
+        // pctx->last_spawn_timestamp = now;
+        // if (last)
+        // {
+        //   u64 interval = now - last;
+        //   if (!pctx->task_spawn_interval_avg)
+        //     pctx->task_spawn_interval_avg = interval;
+        //   else
+        //     pctx->task_spawn_interval_avg = (pctx->task_spawn_interval_avg * (HISTORIC_SPAWN_SAMPLES - 1) + interval) / HISTORIC_SPAWN_SAMPLES;
+        // }
+        // bpf_spin_unlock(&pctx->lock);
       }
-      if (!is_kthread(p) && (isSpammer(pctx) || isSubtreeHog(pctx, now)))
+      /*      if (!is_kthread(p) && isSpammer(pctx))
+            {
+              context->current_dsq_type = DSQ_TYPE_GREEDY;
+              context->task_spawn_interval_avg = pctx->task_spawn_interval_avg;
+              context->last_spawn_timestamp = pctx->last_spawn_timestamp;
+            }
+            else*/
+      if (!is_kthread(p) && isSubtreeHog(pctx, now))
       {
         context->current_dsq_type = DSQ_TYPE_GREEDY;
-        context->task_spawn_interval_avg = pctx->task_spawn_interval_avg;
-        context->last_spawn_timestamp = pctx->last_spawn_timestamp;
       }
     }
   }
@@ -284,13 +289,13 @@ s32 BPF_STRUCT_OPS(
   bool isIdle;
   u32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &isIdle);
 
-  if (isIdle && (context->current_dsq_type != DSQ_TYPE_GREEDY || !context->first_runtime_avg_sample_taken) && !isSpammer(context))
-  {
-    creditVlag(context);
-    u64 slice = get_dsq_task_slice(context->current_dsq_type);
-    context->last_run_granted_slice = slice;
-    scx_bpf_dsq_insert(p, DEFAULT_DSQ_LOCAL_ON | cpu, slice, 0);
-  }
+  // if (isIdle /*&& (context->current_dsq_type != DSQ_TYPE_GREEDY || !context->first_runtime_avg_sample_taken)  && !isSpammer(context)*/)
+  // {
+  //   creditVlag(context);
+  //   u64 slice = get_dsq_task_slice(context->current_dsq_type);
+  //   context->last_run_granted_slice = slice;
+  //   scx_bpf_dsq_insert(p, DEFAULT_DSQ_LOCAL_ON | cpu, slice, 0);
+  // }
   return cpu;
 }
 

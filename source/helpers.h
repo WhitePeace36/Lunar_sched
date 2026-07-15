@@ -47,7 +47,7 @@ static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
     case DSQ_TYPE_GREEDY:
       return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
   }
-  return DSQ_CPU_QUEUE_BASE_LC + cpu;
+  return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
 }
 
 static __always_inline u64 get_llc_dsq_from_type(u64 dsqType, u32 llc)
@@ -67,7 +67,7 @@ static __always_inline u64 get_llc_dsq_from_type(u64 dsqType, u32 llc)
     case DSQ_TYPE_GREEDY:
       return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
   }
-  return DSQ_LLC_QUEUE_BASE_LC + llc;
+  return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
 }
 
 static __always_inline bool is_kthread(const struct task_struct* p)
@@ -92,16 +92,16 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
   return cpu_to_llc[cpu];
 }
 
-static __always_inline bool isSpammer(struct task_ctx* task)
-{
-  if (!task)
-  {
-    return false;
-  }
-  u64 now = bpf_ktime_get_ns();
-  u64 wasLastSpawnInThreshold = now - task->last_spawn_timestamp;
-  return task->task_spawn_interval_avg && task->task_spawn_interval_avg < TASK_SPAWN_AVG_THRESH && wasLastSpawnInThreshold < TASK_LAST_SPAWN_THRESH;
-}
+// static __always_inline bool isSpammer(struct task_ctx* task)
+// {
+//   if (!task)
+//   {
+//     return false;
+//   }
+//   u64 now = bpf_ktime_get_ns();
+//   u64 wasLastSpawnInThreshold = now - task->last_spawn_timestamp;
+//   return task->task_spawn_interval_avg && task->task_spawn_interval_avg < TASK_SPAWN_AVG_THRESH && wasLastSpawnInThreshold < TASK_LAST_SPAWN_THRESH;
+// }
 
 static __always_inline void creditVlag(struct task_ctx* context)
 {
