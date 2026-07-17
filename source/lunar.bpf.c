@@ -61,7 +61,7 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
     case DSQ_TYPE_NORMAL:
       if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
       {
-        task_ctx->current_dsq_type = DSQ_TYPE_LC;
+        task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_NORMAL + ((RUNTIME_PRIO_BOUNDARY_NORMAL * RUNTIME_THRESH_PERCENT) / 100))) ||
