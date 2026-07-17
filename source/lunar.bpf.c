@@ -41,45 +41,45 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
   {
     case DSQ_TYPE_LC:
       if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= ((RUNTIME_PRIO_BOUNDARY_LC + (RUNTIME_PRIO_BOUNDARY_LC * RUNTIME_THRESH_PERCENT) / 100))) ||
-          task_ctx->vlag < VLAG_DEMOTE_THRESH)
+          (task_ctx->vlag <= VLAG_PRIO_BOUNDARY_LC + ((VLAG_PRIO_BOUNDARY_LC * VLAG_THRESH_PERCENT) / 100)))
       {
         task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
       }
       break;
     case DSQ_TYPE_INTERACTIVE:
-      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_LC)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_LC)) || task_ctx->vlag > VLAG_PRIO_BOUNDARY_LC)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_LC;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE + ((RUNTIME_PRIO_BOUNDARY_INTERACTIVE * RUNTIME_THRESH_PERCENT) / 100))) ||
-               task_ctx->vlag < VLAG_DEMOTE_THRESH)
+               (task_ctx->vlag <= VLAG_PRIO_BOUNDARY_INTERACTIVE + ((VLAG_PRIO_BOUNDARY_INTERACTIVE * VLAG_THRESH_PERCENT) / 100)))
       {
         task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
       }
       break;
     case DSQ_TYPE_NORMAL:
-      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) || task_ctx->vlag > VLAG_PRIO_BOUNDARY_INTERACTIVE)
       {
-        task_ctx->current_dsq_type = DSQ_TYPE_LC;
+        task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_NORMAL + ((RUNTIME_PRIO_BOUNDARY_NORMAL * RUNTIME_THRESH_PERCENT) / 100))) ||
-               task_ctx->vlag < VLAG_DEMOTE_THRESH)
+               (task_ctx->vlag <= VLAG_PRIO_BOUNDARY_NORMAL + ((VLAG_PRIO_BOUNDARY_NORMAL * VLAG_THRESH_PERCENT) / 100)))
       {
         task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
       }
       break;
     case DSQ_TYPE_BATCH:
-      if (task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_NORMAL) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      if (task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_NORMAL) || task_ctx->vlag > VLAG_PRIO_BOUNDARY_NORMAL)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
       }
       break;
     case DSQ_TYPE_GREEDY:
       if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= RUNTIME_PRIO_BOUNDARY_BATCH) ||
-           (!task_ctx->first_runtime_avg_sample_taken && task_ctx->current_runtime <= RUNTIME_PRIO_BOUNDARY_BATCH)) &&
-          task_ctx->vlag > VLAG_PROMOTE_THRESH)
+           (!task_ctx->first_runtime_avg_sample_taken && task_ctx->current_runtime <= RUNTIME_PRIO_BOUNDARY_BATCH)) ||
+          task_ctx->vlag > VLAG_PRIO_BOUNDARY_BATCH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
       }
@@ -89,8 +89,8 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
   {
     if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100)) ||
          (!task_ctx->first_runtime_avg_sample_taken &&
-          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) &&
-        task_ctx->vlag < VLAG_DEMOTE_THRESH)
+          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) ||
+        (task_ctx->vlag <= VLAG_PRIO_BOUNDARY_BATCH + ((VLAG_PRIO_BOUNDARY_BATCH * VLAG_THRESH_PERCENT) / 100)))
     {
       task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
     }
