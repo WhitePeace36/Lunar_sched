@@ -15,13 +15,10 @@ const volatile u32 schedulerMode = 1;
 
 struct task_ctx
 {
-  u64 current_dsq_type;
-  u64 runtime_avg;
-  u64 current_runtime;
   u64 last_yield_timestamp;
   s64 vlag;
   u64 last_run_granted_slice;
-  bool first_runtime_avg_sample_taken;
+  u64 ready_to_run_timestamp;
 };
 
 struct

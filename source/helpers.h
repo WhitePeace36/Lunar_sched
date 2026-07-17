@@ -10,69 +10,69 @@
 #include "datatypes.h"
 #include "defines.h"
 
-static __always_inline u64 get_dsq_task_slice(u64 dsqType)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return SLICE_LC;
-    case DSQ_TYPE_INTERACTIVE:
-      return SLICE_INTERACTIVE;
-    case DSQ_TYPE_NORMAL:
-      return SLICE_NORMAL;
-    case DSQ_TYPE_BATCH:
-      return SLICE_BATCH;
-    case DSQ_TYPE_GREEDY:
-      return SLICE_GREEDY;
-  }
-  return SLICE_GREEDY;
-}
+// static __always_inline u64 get_dsq_task_slice(u64 dsqType)
+// {
+//   switch (dsqType)
+//   {
+//     case DSQ_TYPE_LC:
+//       return SLICE_LC;
+//     case DSQ_TYPE_INTERACTIVE:
+//       return SLICE_INTERACTIVE;
+//     case DSQ_TYPE_NORMAL:
+//       return SLICE_NORMAL;
+//     case DSQ_TYPE_BATCH:
+//       return SLICE_BATCH;
+//     case DSQ_TYPE_GREEDY:
+//       return SLICE_GREEDY;
+//   }
+//   return SLICE_GREEDY;
+// }
 
-static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return DSQ_CPU_QUEUE_BASE_LC + cpu;
-    case DSQ_TYPE_INTERACTIVE:
-      return DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu;
-    case DSQ_TYPE_NORMAL:
-      return DSQ_CPU_QUEUE_BASE_NORMAL + cpu;
-    case DSQ_TYPE_BATCH:
-      return DSQ_CPU_QUEUE_BASE_BATCH + cpu;
-    case DSQ_TYPE_GREEDY:
-      return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
-  }
-  return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
-}
+// static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
+// {
+//   switch (dsqType)
+//   {
+//     case DSQ_TYPE_LC:
+//       return DSQ_CPU_QUEUE_BASE_LC + cpu;
+//     case DSQ_TYPE_INTERACTIVE:
+//       return DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu;
+//     case DSQ_TYPE_NORMAL:
+//       return DSQ_CPU_QUEUE_BASE_NORMAL + cpu;
+//     case DSQ_TYPE_BATCH:
+//       return DSQ_CPU_QUEUE_BASE_BATCH + cpu;
+//     case DSQ_TYPE_GREEDY:
+//       return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
+//   }
+//   return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
+// }
 
-static __always_inline u64 get_llc_dsq_from_type(u64 dsqType, u32 llc)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return DSQ_LLC_QUEUE_BASE_LC + llc;
-    case DSQ_TYPE_INTERACTIVE:
-      return DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc;
-    case DSQ_TYPE_NORMAL:
-      return DSQ_LLC_QUEUE_BASE_NORMAL + llc;
-    case DSQ_TYPE_BATCH:
-      return DSQ_LLC_QUEUE_BASE_BATCH + llc;
-    case DSQ_TYPE_GREEDY:
-      return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
-  }
-  return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
-}
+// static __always_inline u64 get_llc_dsq_from_type(u64 dsqType, u32 llc)
+// {
+//   switch (dsqType)
+//   {
+//     case DSQ_TYPE_LC:
+//       return DSQ_LLC_QUEUE_BASE_LC + llc;
+//     case DSQ_TYPE_INTERACTIVE:
+//       return DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc;
+//     case DSQ_TYPE_NORMAL:
+//       return DSQ_LLC_QUEUE_BASE_NORMAL + llc;
+//     case DSQ_TYPE_BATCH:
+//       return DSQ_LLC_QUEUE_BASE_BATCH + llc;
+//     case DSQ_TYPE_GREEDY:
+//       return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
+//   }
+//   return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
+// }
 
 static __always_inline bool is_kthread(const struct task_struct* p)
 {
   return p->flags & PF_KTHREAD;
 }
 
-static __always_inline bool is_high_prio_kthread_task(struct task_struct* p)
-{
-  return p->prio == MAX_RT_PRIO && is_kthread(p);
-}
+// static __always_inline bool is_high_prio_kthread_task(struct task_struct* p)
+// {
+//   return p->prio == MAX_RT_PRIO && is_kthread(p);
+// }
 
 static __always_inline struct task_ctx* get_task_ctx(struct task_struct* task)
 {
