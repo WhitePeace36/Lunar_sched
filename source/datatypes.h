@@ -16,24 +16,12 @@ const volatile u32 schedulerMode = 1;
 struct task_ctx
 {
   u64 current_dsq_type;
-  u64 dsq_type_before_boost;
   u64 runtime_avg;
   u64 current_runtime;
   u64 last_yield_timestamp;
-  bool first_runtime_avg_sample_taken;
-  bool boostUntilYield;
   s64 vlag;
-  u64 last_spawn_timestamp;
-  u64 task_spawn_interval_avg;
   u64 last_run_granted_slice;
-  struct bpf_spin_lock lock;
-  u64 subtree_cost;
-  u64 last_subtree_decay;
-};
-
-struct dispatch_ctx
-{
-  u64 runtime_per_queue[DSQ_PRIO_QUEUE_AMOUNT];
+  bool first_runtime_avg_sample_taken;
 };
 
 struct
@@ -43,13 +31,5 @@ struct
   __type(key, u32);  // pid
   __type(value, struct task_ctx);
 } task_ctx_map SEC(".maps");
-
-struct
-{
-  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-  __uint(max_entries, 1);
-  __type(key, u32);
-  __type(value, struct dispatch_ctx);
-} dispatch_state SEC(".maps");
 
 #endif  // DATATYPES_H

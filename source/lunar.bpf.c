@@ -15,37 +15,27 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-static __always_inline u64 dispatch_with_fallback(
-  u32 cpu,
-  struct dispatch_ctx* ctx)
+static __always_inline u64 dispatch_with_fallback(u32 cpu)
 {
   switch (schedulerMode)
   {
     case SCHED_MODE_DSQ_PER_LLC:
     {
       u32 llc = cpu_llc_id(cpu);
-      return dispatch_dsq_per_llc(llc, ctx);
+      return dispatch_dsq_per_llc(llc);
       break;
     }
 
     case SCHED_MODE_DSQ_PER_CPU:
-      return dispatch_dsq_per_cpu(cpu, ctx);
+      return dispatch_dsq_per_cpu(cpu);
       break;
   }
 
   return DSQ_TYPE_EMPTY;
 }
 
-static __always_inline void update_task_dsq_type(
-  struct task_struct* task,
-  struct task_ctx* task_ctx,
-  struct dispatch_ctx* dispatch_ctx)
+static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
 {
-  if (!is_kthread(task) && (/*isSpammer(task_ctx) ||*/ (task_ctx->current_dsq_type > SUBTREE_OVERRIDE_PROTECT_MAX_TIER && isSubtreeHog(task_ctx, bpf_ktime_get_ns()))))
-  {
-    task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
-    return;
-  }
 
   switch (task_ctx->current_dsq_type)
   {
@@ -71,7 +61,7 @@ static __always_inline void update_task_dsq_type(
     case DSQ_TYPE_NORMAL:
       if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
       {
-        task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
+        task_ctx->current_dsq_type = DSQ_TYPE_LC;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_NORMAL + ((RUNTIME_PRIO_BOUNDARY_NORMAL * RUNTIME_THRESH_PERCENT) / 100))) ||
@@ -95,7 +85,7 @@ static __always_inline void update_task_dsq_type(
       }
       break;
   }
-  if (task_ctx->current_dsq_type != DSQ_TYPE_SOFT && task_ctx->current_dsq_type != DSQ_TYPE_GREEDY)
+  if (task_ctx->current_dsq_type != DSQ_TYPE_GREEDY)
   {
     if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100)) ||
          (!task_ctx->first_runtime_avg_sample_taken &&
@@ -107,7 +97,7 @@ static __always_inline void update_task_dsq_type(
   }
 }
 
-static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, struct dispatch_ctx* dispatch_ctx, u64 used_ns, bool runnable)
+static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, u64 used_ns, bool runnable)
 {
   if (!task_ctx)
   {
@@ -124,26 +114,26 @@ static __always_inline void update_task_prio(struct task_struct* task, struct ta
   {
     task_ctx->runtime_avg = task_ctx->current_runtime;
   }
+
   if (!runnable)
   {
     if (!task_ctx->first_runtime_avg_sample_taken)
     {
       task_ctx->runtime_avg = task_ctx->current_runtime;
+      task_ctx->first_runtime_avg_sample_taken = true;
     }
     else
     {
       task_ctx->runtime_avg = (task_ctx->runtime_avg * (HISTORIC_TASK_SAMPLES - 1) + task_ctx->current_runtime) / HISTORIC_TASK_SAMPLES;
     }
-
     task_ctx->current_runtime = 0;
-    task_ctx->first_runtime_avg_sample_taken = true;
   }
   if (task_ctx->runtime_avg < MIN_AVG_RUNTIME)
   {
     task_ctx->runtime_avg = MIN_AVG_RUNTIME;
   }
 
-  update_task_dsq_type(task, task_ctx, dispatch_ctx);
+  update_task_dsq_type(task, task_ctx);
 }
 
 // callbacks
@@ -156,14 +146,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
   u32 cpu;
   bpf_for(cpu, 0, nr_cpu_ids)
   {
-    u32 key = 0;
-    struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
-    if (!dispatch_ctx)
-      return -EINVAL;
-
-    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_SOFT + cpu, -1);
-    if (ret)
-      return ret;
     ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_LC + cpu, -1);
     if (ret)
       return ret;
@@ -183,9 +165,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
   u32 llc;
   bpf_for(llc, 0, nr_llcs)
   {
-    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_SOFT + llc, -1);
-    if (ret)
-      return ret;
     ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_LC + llc, -1);
     if (ret)
       return ret;
@@ -214,11 +193,7 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
                                   .current_dsq_type = DSQ_TYPE_BATCH,
                                   .vlag = 200 * NS_PER_US,
                                   .last_yield_timestamp = now,
-                                  .first_runtime_avg_sample_taken = false,
-                                  .last_spawn_timestamp = now,
-                                  .task_spawn_interval_avg = 0,
-                                  .subtree_cost = 0,
-                                  .last_subtree_decay = now};
+                                  .first_runtime_avg_sample_taken = false};
 
   u32 pid = p->pid;
   long ret = bpf_map_update_elem(&task_ctx_map, &pid, &context_temp, BPF_ANY);
@@ -227,50 +202,13 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
     return ret;
   }
 
-  struct task_ctx* context = get_task_ctx(p);
-  if (!context)
-  {
-    return 0;
-  }
-  if (args && args->fork)
-  {
-    struct task_struct* spawner = get_spawner(p);
-    if (spawner)
-    {
-      struct task_ctx* pctx = get_task_ctx(spawner);
-      /*      if (pctx)
-            {
-              bpf_spin_lock(&pctx->lock);
-              u64 last = pctx->last_spawn_timestamp;
-              pctx->last_spawn_timestamp = now;
-              if (last)
-              {
-                u64 interval = now - last;
-                if (!pctx->task_spawn_interval_avg)
-                  pctx->task_spawn_interval_avg = interval;
-                else
-                  pctx->task_spawn_interval_avg = (pctx->task_spawn_interval_avg * (HISTORIC_SPAWN_SAMPLES - 1) + interval) / HISTORIC_SPAWN_SAMPLES;
-              }
-              bpf_spin_unlock(&pctx->lock);
-            }
-            if (!is_kthread(p) && isSpammer(pctx))
-            {
-              context->current_dsq_type = DSQ_TYPE_GREEDY;
-              context->task_spawn_interval_avg = pctx->task_spawn_interval_avg;
-              context->last_spawn_timestamp = pctx->last_spawn_timestamp;
-            }
-            else*/
-      if (!is_kthread(p) && isSubtreeHog(pctx, now))
-      {
-        context->current_dsq_type = DSQ_TYPE_GREEDY;
-      }
-    }
-  }
-
   return ret;
 }
 
-void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args)
+void BPF_STRUCT_OPS(
+  lunar_exit_task,
+  struct task_struct* p,
+  struct scx_exit_task_args* args)
 {
   u32 pid = p->pid;
   bpf_map_delete_elem(&task_ctx_map, &pid);
@@ -299,30 +237,19 @@ s32 BPF_STRUCT_OPS(
   return cpu;
 }
 
-void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
+void BPF_STRUCT_OPS(
+  lunar_enqueue,
+  struct task_struct* p,
+  u64 enq_flags)
 {
   struct task_ctx* context = get_task_ctx(p);
   if (!context)
     return;
 
-  u32 key = 0;
-  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, bpf_get_smp_processor_id());
-  if (!dispatch_ctx)
-    return;
-
   if (enq_flags & SCX_ENQ_WAKEUP)
   {
-    if (is_high_prio_kthread_task(p))
-    {
-      context->current_dsq_type = DSQ_TYPE_SOFT;
-    }
-    // bpf_printk("CREDITED CALLED");
     creditVlag(context);
   }
-  // else
-  // {
-  //   bpf_printk("NOT CREDITED enqflags: %llu", enq_flags);
-  // }
 
   u64 dsqType = context ? context->current_dsq_type : QUEUE_START;
   u32 cpu = scx_bpf_task_cpu(p);
@@ -346,12 +273,7 @@ void BPF_STRUCT_OPS(
   s32 cpu,
   struct task_struct* prev)
 {
-  u32 key = 0;
-  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
-  if (!dispatch_ctx)
-    return;
-
-  dispatch_with_fallback(cpu, dispatch_ctx);
+  dispatch_with_fallback(cpu);
 }
 
 void BPF_STRUCT_OPS(
@@ -368,11 +290,6 @@ void BPF_STRUCT_OPS(
   if (!tctx)
     return;
 
-  u32 key = 0;
-  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, bpf_get_smp_processor_id());
-  if (!dispatch_ctx)
-    return;
-
   u64 task_slice = tctx->last_run_granted_slice;
   u64 remaining = task->scx.slice;
 
@@ -382,24 +299,12 @@ void BPF_STRUCT_OPS(
   if (tctx->vlag < VLAG_MIN)
     tctx->vlag = VLAG_MIN;
 
-  fold_subtree_cost(task, tctx, used_ns, now);
-
   if (!runnable)
   {
     tctx->last_yield_timestamp = now;
   }
 
-  u64 current_dsq = tctx->current_dsq_type;
-  u64 dsqIndex;
-  bpf_for(dsqIndex, DSQ_TYPE_SOFT, DSQ_TYPE_GREEDY) /* LC..BATCH */
-  {
-    if (dsqIndex >= current_dsq)
-      dispatch_ctx->runtime_per_queue[dsqIndex] += used_ns;
-    else
-      dispatch_ctx->runtime_per_queue[dsqIndex] = 0;
-  }
-
-  update_task_prio(task, tctx, dispatch_ctx, used_ns, runnable);
+  update_task_prio(task, tctx, used_ns, runnable);
 }
 
 void BPF_STRUCT_OPS(
@@ -424,9 +329,8 @@ void BPF_STRUCT_OPS(
 
 //   u64 now = bpf_ktime_get_ns();
 
-//   // bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu vlag=%lld avg=%llu subtree=%llu slice=%llu", bpf_get_smp_processor_id(), p->pid, p->comm, tctx->current_dsq_type,
-//   // tctx->vlag,
-//   //            tctx->runtime_avg, subtree_cost_view(tctx, now), tctx->last_run_granted_slice);
+//   bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu vlag=%lld avg=%llu slice=%llu", bpf_get_smp_processor_id(), p->pid, p->comm, tctx->current_dsq_type, tctx->vlag,
+//              tctx->runtime_avg, tctx->last_run_granted_slice);
 // }
 
 SCX_OPS_DEFINE(lunar_ops,
