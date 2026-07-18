@@ -32,4 +32,3 @@
 #define MAX_CPUS 512
 
 #endif  // DEFINES_H
-d
