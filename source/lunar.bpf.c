@@ -36,7 +36,11 @@ static __always_inline u64 dispatch_with_fallback(u32 cpu)
 
 static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
 {
-
+  if (is_high_prio_kthread_task(task))
+  {
+    return;
+  }
+  bool queueChanged = false;
   switch (task_ctx->current_dsq_type)
   {
     case DSQ_TYPE_LC:
@@ -44,36 +48,42 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
           task_ctx->vlag < VLAG_DEMOTE_THRESH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
+        queueChanged = true;
       }
       break;
     case DSQ_TYPE_INTERACTIVE:
       if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_LC)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_LC;
+        queueChanged = true;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE + ((RUNTIME_PRIO_BOUNDARY_INTERACTIVE * RUNTIME_THRESH_PERCENT) / 100))) ||
                task_ctx->vlag < VLAG_DEMOTE_THRESH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
+        queueChanged = true;
       }
       break;
     case DSQ_TYPE_NORMAL:
       if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
+        queueChanged = true;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_NORMAL + ((RUNTIME_PRIO_BOUNDARY_NORMAL * RUNTIME_THRESH_PERCENT) / 100))) ||
                task_ctx->vlag < VLAG_DEMOTE_THRESH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
+        queueChanged = true;
       }
       break;
     case DSQ_TYPE_BATCH:
       if (task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_NORMAL) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
+        queueChanged = true;
       }
       break;
     case DSQ_TYPE_GREEDY:
@@ -82,6 +92,7 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
           task_ctx->vlag > VLAG_PROMOTE_THRESH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
+        queueChanged = true;
       }
       break;
   }
@@ -93,7 +104,12 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
         task_ctx->vlag < VLAG_DEMOTE_THRESH)
     {
       task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
+      queueChanged = true;
     }
+  }
+  if (queueChanged)
+  {
+    task_ctx->vtime = vtime_now[task_ctx->current_dsq_type];
   }
 }
 
@@ -248,10 +264,44 @@ void BPF_STRUCT_OPS(
 
   if (enq_flags & SCX_ENQ_WAKEUP)
   {
+    if (is_high_prio_kthread_task(p))
+    {
+      context->current_dsq_type = DSQ_TYPE_LC;
+    }
     creditVlag(context);
   }
 
-  u64 dsqType = context ? context->current_dsq_type : QUEUE_START;
+  // u64 budget = 1ULL;
+  // u64 credit = slice * VTIME_CREDIT_FACTOR; /* start: 2 */
+  // u64 debt = slice * VTIME_DEBT_FACTOR;     /* start: 4 */
+  u64 dsqType = context->current_dsq_type; /* copy to a local FIRST */
+  if (dsqType > DSQ_TYPE_GREEDY)           /* now bound the LOCAL */
+    dsqType = DSQ_TYPE_GREEDY;
+
+  u64 slice = get_dsq_task_slice(dsqType);
+  u64 credit = slice * VTIME_CREDIT_FACTOR;
+  u64 debit = slice * VTIME_DEBIT_FACTOR;
+  u64 vnow = vtime_now[dsqType];
+
+  // if (vtime_before(context->vtime, vnow - budget))
+  //   context->vtime = vnow - budget;
+
+  // if (vtime_before(vnow + budget, context->vtime))
+  //   context->vtime = vnow + budget;
+
+  /* enqueue */
+  u64 key = context->vtime;
+  if (vtime_before(key, vnow - credit))
+  {
+    key = vnow - credit;
+    context->vtime = key; /* write back: bank limit is real policy */
+  }
+  if (vtime_before(vnow + debit, key))
+    key = vnow + debit; /* NO write-back: debt stays on the books */
+
+  context->last_key = key;
+
+  /* running: clock follows the popped minimum KEY, not raw vtime */
   u32 cpu = scx_bpf_task_cpu(p);
   u64 dsq;
   if (schedulerMode == SCHED_MODE_DSQ_PER_LLC)
@@ -263,9 +313,9 @@ void BPF_STRUCT_OPS(
   {
     dsq = get_cpu_dsq_from_type(dsqType, cpu);
   }
-  u64 slice = get_dsq_task_slice(dsqType);
+
   context->last_run_granted_slice = slice;
-  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
+  scx_bpf_dsq_insert_vtime(p, dsq, slice, /*context->vtime*/ key, enq_flags);
 }
 
 void BPF_STRUCT_OPS(
@@ -299,6 +349,9 @@ void BPF_STRUCT_OPS(
   if (tctx->vlag < VLAG_MIN)
     tctx->vlag = VLAG_MIN;
 
+  u64 delta = now - tctx->running_at;
+  tctx->vtime += delta;
+
   if (!runnable)
   {
     tctx->last_yield_timestamp = now;
@@ -314,31 +367,36 @@ void BPF_STRUCT_OPS(
   UEI_RECORD(uei, ei);
 }
 
-// void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
-// {
-//   if (!p)
-//     return;
+void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
+{
+  if (!p)
+    return;
 
-//   struct task_ctx* tctx = get_task_ctx(p);
-//   if (!tctx)
-//     return;
+  struct task_ctx* context = get_task_ctx(p);
+  if (!context)
+    return;
 
-//   /* Cut the noise: uncomment to skip kernel threads, or gate on comm. */
-//   // if (is_kthread(p))
-//   //   return;
+  context->running_at = bpf_ktime_get_ns();
 
-//   u64 now = bpf_ktime_get_ns();
+  u64 dsqType = context->current_dsq_type; /* copy to a local FIRST */
+  if (dsqType > DSQ_TYPE_GREEDY)           /* now bound the LOCAL */
+    dsqType = DSQ_TYPE_GREEDY;
+  // if (t <= DSQ_TYPE_GREEDY && vtime_before(vtime_now[t], context->vtime))
+  //   vtime_now[t] = context->vtime;
 
-//   bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu vlag=%lld avg=%llu slice=%llu", bpf_get_smp_processor_id(), p->pid, p->comm, tctx->current_dsq_type, tctx->vlag,
-//              tctx->runtime_avg, tctx->last_run_granted_slice);
-// }
+  if (vtime_before(vtime_now[dsqType], context->last_key))
+    vtime_now[dsqType] = context->last_key;
+
+  // bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu vlag=%lld avg=%llu slice=%llu", bpf_get_smp_processor_id(), p->pid, p->comm, tctx->current_dsq_type, tctx->vlag,
+  //            tctx->runtime_avg, tctx->last_run_granted_slice);
+}
 
 SCX_OPS_DEFINE(lunar_ops,
                .init = (void*)lunar_init,
                .init_task = (void*)lunar_init_task,
                .exit_task = (void*)lunar_exit_task,
                .select_cpu = (void*)lunar_select_cpu,
-               //.running = (void*)lunar_running,
+               .running = (void*)lunar_running,
                .enqueue = (void*)lunar_enqueue,
                .dispatch = (void*)lunar_dispatch,
                .stopping = (void*)lunar_stopping,

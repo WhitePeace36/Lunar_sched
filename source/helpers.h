@@ -64,6 +64,13 @@ static __always_inline u64 get_llc_dsq_from_type(u64 dsqType, u32 llc)
   return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
 }
 
+static __always_inline bool vtime_before(
+  u64 a,
+  u64 b)
+{
+  return (s64)(a - b) < 0; /* wraparound-safe, never compare u64 directly */
+}
+
 static __always_inline bool is_kthread(const struct task_struct* p)
 {
   return p->flags & PF_KTHREAD;

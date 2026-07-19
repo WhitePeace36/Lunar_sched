@@ -13,6 +13,8 @@ const volatile u32 nr_llcs = 1;
 const volatile u32 cpu_to_llc[MAX_CPUS] = {};
 const volatile u32 schedulerMode = 1;
 
+static u64 vtime_now[DSQ_PRIO_QUEUE_AMOUNT];
+
 struct task_ctx
 {
   u64 current_dsq_type;
@@ -22,6 +24,9 @@ struct task_ctx
   s64 vlag;
   u64 last_run_granted_slice;
   bool first_runtime_avg_sample_taken;
+  u64 vtime;
+  u64 running_at;
+  u64 last_key;
 };
 
 struct
