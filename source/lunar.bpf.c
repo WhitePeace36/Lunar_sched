@@ -36,10 +36,10 @@ static __always_inline u64 dispatch_with_fallback(u32 cpu, struct dispatch_ctx* 
 
 static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
 {
-  // if (is_kthread(task))
-  // {
-  //   return;
-  // }
+  if (is_high_prio_kthread_task(task))
+  {
+    return;
+  }
   bool queueChanged = false;
   switch (task_ctx->current_dsq_type)
   {
@@ -275,10 +275,10 @@ void BPF_STRUCT_OPS(
 
   if (enq_flags & SCX_ENQ_WAKEUP)
   {
-    // if (is_kthread(p))
-    // {
-    //   context->current_dsq_type = DSQ_TYPE_LC;
-    // }
+    if (is_high_prio_kthread_task(p))
+    {
+      context->current_dsq_type = DSQ_TYPE_LC;
+    }
     creditVlag(context);
   }
 
