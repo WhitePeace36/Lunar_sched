@@ -15,19 +15,19 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-static __always_inline u64 dispatch_with_fallback(u32 cpu)
+static __always_inline u64 dispatch_with_fallback(u32 cpu, struct dispatch_ctx* ctx)
 {
   switch (schedulerMode)
   {
     case SCHED_MODE_DSQ_PER_LLC:
     {
       u32 llc = cpu_llc_id(cpu);
-      return dispatch_dsq_per_llc(llc);
+      return dispatch_dsq_per_llc(llc, ctx);
       break;
     }
 
     case SCHED_MODE_DSQ_PER_CPU:
-      return dispatch_dsq_per_cpu(cpu);
+      return dispatch_dsq_per_cpu(cpu, ctx);
       break;
   }
 
@@ -36,10 +36,10 @@ static __always_inline u64 dispatch_with_fallback(u32 cpu)
 
 static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
 {
-  if (is_high_prio_kthread_task(task))
-  {
-    return;
-  }
+  // if (is_kthread(task))
+  // {
+  //   return;
+  // }
   bool queueChanged = false;
   switch (task_ctx->current_dsq_type)
   {
@@ -107,10 +107,10 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
       queueChanged = true;
     }
   }
-  if (queueChanged)
-  {
-    task_ctx->vtime = vtime_now[task_ctx->current_dsq_type];
-  }
+  // if (queueChanged)
+  // {
+  //   task_ctx->vtime = vtime_now[task_ctx->current_dsq_type];
+  // }
 }
 
 static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, u64 used_ns, bool runnable)
@@ -206,7 +206,7 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
   u64 now = bpf_ktime_get_ns();
   struct task_ctx context_temp = {.runtime_avg = AVG_RUNTIME_START,
                                   .current_runtime = 0,
-                                  .current_dsq_type = DSQ_TYPE_BATCH,
+                                  .current_dsq_type = DSQ_TYPE_GREEDY,
                                   .vlag = 200 * NS_PER_US,
                                   .last_yield_timestamp = now,
                                   .first_runtime_avg_sample_taken = false};
@@ -262,26 +262,30 @@ void BPF_STRUCT_OPS(
   if (!context)
     return;
 
+  u32 cpu = scx_bpf_task_cpu(p);
+
+  u32 mapKey = 0;
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &mapKey, cpu);
+  if (!dispatch_ctx)
+    return;
+
+  u64 dsqType = context->current_dsq_type;
+  if (dsqType > DSQ_TYPE_GREEDY)
+    dsqType = DSQ_TYPE_GREEDY;
+
   if (enq_flags & SCX_ENQ_WAKEUP)
   {
-    if (is_high_prio_kthread_task(p))
-    {
-      context->current_dsq_type = DSQ_TYPE_LC;
-    }
+    // if (is_kthread(p))
+    // {
+    //   context->current_dsq_type = DSQ_TYPE_LC;
+    // }
     creditVlag(context);
   }
 
-  // u64 budget = 1ULL;
-  // u64 credit = slice * VTIME_CREDIT_FACTOR; /* start: 2 */
-  // u64 debt = slice * VTIME_DEBT_FACTOR;     /* start: 4 */
-  u64 dsqType = context->current_dsq_type; /* copy to a local FIRST */
-  if (dsqType > DSQ_TYPE_GREEDY)           /* now bound the LOCAL */
-    dsqType = DSQ_TYPE_GREEDY;
-
   u64 slice = get_dsq_task_slice(dsqType);
-  u64 credit = slice * VTIME_CREDIT_FACTOR;
-  u64 debit = slice * VTIME_DEBIT_FACTOR;
-  u64 vnow = vtime_now[dsqType];
+  // u64 credit = slice * VTIME_CREDIT_FACTOR;
+  // u64 debit = slice * VTIME_DEBIT_FACTOR;
+  // u64 vnow = vtime_now[dsqType];
 
   // if (vtime_before(context->vtime, vnow - budget))
   //   context->vtime = vnow - budget;
@@ -290,19 +294,17 @@ void BPF_STRUCT_OPS(
   //   context->vtime = vnow + budget;
 
   /* enqueue */
-  u64 key = context->vtime;
-  if (vtime_before(key, vnow - credit))
-  {
-    key = vnow - credit;
-    context->vtime = key; /* write back: bank limit is real policy */
-  }
-  if (vtime_before(vnow + debit, key))
-    key = vnow + debit; /* NO write-back: debt stays on the books */
+  // u64 key = context->vtime;
+  // if (vtime_before(key, vnow - credit))
+  // {
+  //   key = vnow - credit;
+  //   context->vtime = key; /* write back: bank limit is real policy */
+  // }
+  // if (vtime_before(vnow + debit, key))
+  //   key = vnow + debit; /* NO write-back: debt stays on the books */
 
-  context->last_key = key;
+  // context->last_key = key;
 
-  /* running: clock follows the popped minimum KEY, not raw vtime */
-  u32 cpu = scx_bpf_task_cpu(p);
   u64 dsq;
   if (schedulerMode == SCHED_MODE_DSQ_PER_LLC)
   {
@@ -315,7 +317,21 @@ void BPF_STRUCT_OPS(
   }
 
   context->last_run_granted_slice = slice;
-  scx_bpf_dsq_insert_vtime(p, dsq, slice, /*context->vtime*/ key, enq_flags);
+  // scx_bpf_dsq_insert_vtime(p, dsq, slice, /*context->vtime*/ key, enq_flags);
+  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
+
+  // if (enq_flags & SCX_ENQ_WAKEUP && dispatch_ctx->current_task_dsq_type > DSQ_TYPE_LC && dsqType == DSQ_TYPE_LC /* && cpu != bpf_get_smp_processor_id()*/)
+  // {
+  //   bool lc_ok = dispatch_ctx->runtime_per_queue[DSQ_TYPE_LC] < MAX_CONTINUOUS_LC_TIME;
+
+  //   u64 dl = dispatch_ctx->current_task_deadline;
+  //   u64 now = bpf_ktime_get_ns();
+  //   if ((s64)(dl - now) >= REMAINING_SLICE_NEEDED_FOR_PREEMPT && (s64)(now - dispatch_ctx->last_kick_timestamp) >= PREEMPT_KICK_INTERVAL_LIMIT && lc_ok)
+  //   {
+  //     dispatch_ctx->last_kick_timestamp = now;
+  //     scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+  //   }
+  // }
 }
 
 void BPF_STRUCT_OPS(
@@ -323,7 +339,12 @@ void BPF_STRUCT_OPS(
   s32 cpu,
   struct task_struct* prev)
 {
-  dispatch_with_fallback(cpu);
+  u32 key = 0;
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
+  if (!dispatch_ctx)
+    return;
+
+  dispatch_with_fallback(cpu, dispatch_ctx);
 }
 
 void BPF_STRUCT_OPS(
@@ -340,16 +361,20 @@ void BPF_STRUCT_OPS(
   if (!tctx)
     return;
 
+  u32 key = 0;
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, bpf_get_smp_processor_id());
+  if (!dispatch_ctx)
+    return;
+
   u64 task_slice = tctx->last_run_granted_slice;
   u64 remaining = task->scx.slice;
 
-  u64 used_ns = (remaining >= task_slice) ? 0 : (task_slice - remaining);
+  u64 delta = now - tctx->running_at;
 
-  tctx->vlag -= (s64)used_ns;
+  tctx->vlag -= (s64)delta;
   if (tctx->vlag < VLAG_MIN)
     tctx->vlag = VLAG_MIN;
 
-  u64 delta = now - tctx->running_at;
   tctx->vtime += delta;
 
   if (!runnable)
@@ -357,7 +382,20 @@ void BPF_STRUCT_OPS(
     tctx->last_yield_timestamp = now;
   }
 
-  update_task_prio(task, tctx, used_ns, runnable);
+  u64 dsqType = tctx->current_dsq_type;
+  if (dsqType > DSQ_TYPE_GREEDY)
+    dsqType = DSQ_TYPE_GREEDY;
+
+  u64 dsqIndex;
+  bpf_for(dsqIndex, DSQ_TYPE_LC, DSQ_TYPE_GREEDY)
+  {
+    if (dsqIndex >= dsqType)
+      dispatch_ctx->runtime_per_queue[dsqIndex] += delta;
+    else
+      dispatch_ctx->runtime_per_queue[dsqIndex] = 0;
+  }
+
+  update_task_prio(task, tctx, delta, runnable);
 }
 
 void BPF_STRUCT_OPS(
@@ -376,19 +414,29 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   if (!context)
     return;
 
-  context->running_at = bpf_ktime_get_ns();
+  u32 key = 0;
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, bpf_get_smp_processor_id());
+  if (!dispatch_ctx)
+    return;
 
-  u64 dsqType = context->current_dsq_type; /* copy to a local FIRST */
-  if (dsqType > DSQ_TYPE_GREEDY)           /* now bound the LOCAL */
-    dsqType = DSQ_TYPE_GREEDY;
-  // if (t <= DSQ_TYPE_GREEDY && vtime_before(vtime_now[t], context->vtime))
-  //   vtime_now[t] = context->vtime;
+  // u64 dsqType = context->current_dsq_type;
+  // if (dsqType > DSQ_TYPE_GREEDY)
+  //   dsqType = DSQ_TYPE_GREEDY;
+  // // if (t <= DSQ_TYPE_GREEDY && vtime_before(vtime_now[t], context->vtime))
+  // //   vtime_now[t] = context->vtime;
 
-  if (vtime_before(vtime_now[dsqType], context->last_key))
-    vtime_now[dsqType] = context->last_key;
+  // if (vtime_before(vtime_now[dsqType], context->last_key))
+  //   vtime_now[dsqType] = context->last_key;
 
-  // bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu vlag=%lld avg=%llu slice=%llu", bpf_get_smp_processor_id(), p->pid, p->comm, tctx->current_dsq_type, tctx->vlag,
-  //            tctx->runtime_avg, tctx->last_run_granted_slice);
+  u64 now = bpf_ktime_get_ns();
+  // dispatch_ctx->current_task_dsq_type = dsqType;
+  context->running_at = now;
+
+  // dispatch_ctx->current_task_deadline = now + (context->runtime_avg < NS_PER_MS ? context->runtime_avg : NS_PER_MS);
+  // dispatch_ctx->current_task_deadline = now + get_dsq_task_slice(dsqType);
+
+  // bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu vlag=%lld avg=%llu slice=%llu vtime=%llu last_key=%llu", bpf_get_smp_processor_id(), p->pid, p->comm,
+  //            context->current_dsq_type, context->vlag, context->runtime_avg, context->last_run_granted_slice, context->vtime, context->last_key);
 }
 
 SCX_OPS_DEFINE(lunar_ops,

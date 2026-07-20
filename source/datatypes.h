@@ -29,6 +29,22 @@ struct task_ctx
   u64 last_key;
 };
 
+struct dispatch_ctx
+{
+  u64 runtime_per_queue[DSQ_PRIO_QUEUE_AMOUNT];
+  u64 current_task_deadline;
+  u64 current_task_dsq_type;
+  u64 last_kick_timestamp;
+};
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, u32);
+  __type(value, struct dispatch_ctx);
+} dispatch_state SEC(".maps");
+
 struct
 {
   __uint(type, BPF_MAP_TYPE_HASH);
