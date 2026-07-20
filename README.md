@@ -3,10 +3,12 @@
 
 ## Introduction
 
-Lunar is a multipurpose cpu scheduler which was created with the goal to make frametimes in games and inputs as consistent as possible.
-But then it grew a little and changed to a desktop usage focused scheduler.
-Which exactly fulfills this requirements. 
+Scx_lunar is a multipurpose scheduler which was originally invented with the goal to make frametimes in games as smooth as possible
+But then it grew a little and changed to a desktop usage focused scheduler which focuses on IO bound and kthreads with prio 100.
 
+Which makes the scheduler one of the best when it comes to responsiveness.
+
+This scheduler uses only FIFO queues and no preemption.
 
 ## Dependencies
 
@@ -57,30 +59,26 @@ sudo ./uninstall.sh
 
 The scheduler does only use FIFO queues and works without preemption. 
 
-It has 6 tiers. Which are: 
+It has 5 tiers. Which are: 
 
-1. SOFT ( KTHREADs with PRIO 100) 
-2. LC which have a positive vlag and <= average runtime of 200us
-3. INTERACTIVE which have a positive vlag and with <= average runtime of 500us
-4. NORMAL which have a positive vlag and with <= average runtime of 2ms
-5. Batch everything else but which does not exceed the avg runtime per cpu by more than a factor of 4
-6. GREEDY everthing which has a 4x or more avg cpu time per run than the avg cpu time of a task on the cpu core.
+1. LC which have a positive vlag and <= average runtime of 200us or KTHREADs with PRIO 100
+2. INTERACTIVE which have a positive vlag and with <= average runtime of 500us
+3. NORMAL which have a positive vlag and with <= average runtime of 2ms
+4. BATCH which have a positive vlag and with <= average runtime of 8ms
+5. GREEDY everything else with more average runtime than 8ms or negative vlag
 
-Tasks and its children will also be thrown into greedy when they are spamming new tasks.
-
-Each tier except SOFT queue has a max continous time gate. Where when there are too many tasks of for example LC and there is a task waiting in INTERACTIVE than after a defined time, one task  of a lower prio task is forced.
+All new tasks get thrown into greedy. Except KTHREADs with PRIO 100 which go into LC queue.
 
 Each tier also has different slice times per task. 
 Which are:
 
-1. SOFT -> 200us
-2. LC -> 200us
-3. INTERACTIVE -> 500us
-4. NORMAL -> 2000us
-5. BATCH -> 2000us
-6. GREEDY -> 2000us
+1. LC -> 200us
+2. INTERACTIVE -> 500us
+3. NORMAL -> 500us
+4. BATCH -> 500us
+5. GREEDY -> 500us
 
-One of the big things of this scheduler is that in LC, Interactive and NORMAL it gives it exactly the slice which the average runtime is. So this makes the execution very smooth.
+One of the big things of this scheduler is that in LC and Interactive it gives it exactly the slice which the average runtime is. So this makes the execution very smooth.
 
 ## MODES
 
@@ -88,18 +86,16 @@ This scheduler also has 2 modes.
 
 `--mode dsqs_per_llc` 
 
-Where the above explained are available for each L3 cache domain. So more than one core pull from the same DSQs.
+
+Where the above explained are available for each LLC. So more than one core pull from the same DSQs.
 
 and:
 
 `--mode dsqs_per_cpu`
 
 DEFAULT MODE!
-This mode is used automatically when starting without start parameters.
-
 Where the above explained dsqs are available for each cpu core. So each core has its own queues.
-
-When running a cpu which has a lot of cores incl. hyperthreading core on one L3 cache domain, then this mode is preferred.
+This mode is used automatically when starting without start parameters.
 
 ## Dispatch
 
@@ -109,11 +105,6 @@ From which core the core startes stealing is randomized for better load distribu
 
 for mode `dsqs_per_llc`
 Each core tries to first to run from the dsqs of the llc from the core. Then it tries to steal from other llcs.
-
-## Gating mechanism
-
-Each dsq has a continous execution gate. Each gate is only allowed to have 2ms of execution time until at least one task of the next lower
-priority has to be run.
 
 ## Testing
 

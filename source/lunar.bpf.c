@@ -36,6 +36,10 @@ static __always_inline u64 dispatch_with_fallback(u32 cpu)
 
 static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
 {
+  if (is_high_prio_kthread_task(task))
+  {
+    return;
+  }
 
   switch (task_ctx->current_dsq_type)
   {
@@ -190,7 +194,7 @@ s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_
   u64 now = bpf_ktime_get_ns();
   struct task_ctx context_temp = {.runtime_avg = AVG_RUNTIME_START,
                                   .current_runtime = 0,
-                                  .current_dsq_type = DSQ_TYPE_BATCH,
+                                  .current_dsq_type = DSQ_TYPE_GREEDY,
                                   .vlag = 200 * NS_PER_US,
                                   .last_yield_timestamp = now,
                                   .first_runtime_avg_sample_taken = false};
@@ -248,6 +252,10 @@ void BPF_STRUCT_OPS(
 
   if (enq_flags & SCX_ENQ_WAKEUP)
   {
+    if (is_high_prio_kthread_task(p))
+    {
+      context->current_dsq_type = DSQ_TYPE_LC;
+    }
     creditVlag(context);
   }
 
