@@ -13,6 +13,8 @@ const volatile u32 nr_llcs = 1;
 const volatile u32 cpu_to_llc[MAX_CPUS] = {};
 const volatile u32 schedulerMode = SCHED_MODE_DSQ_PER_CPU;
 
+extern const int CONFIG_HZ __kconfig;
+
 struct task_ctx
 {
   u64 current_dsq_type;
@@ -22,7 +24,23 @@ struct task_ctx
   s64 vlag;
   u64 last_run_granted_slice;
   bool first_runtime_avg_sample_taken;
+  u64 started_at;
 };
+
+struct dispatch_ctx
+{
+  u64 current_task_deadline;
+  u64 current_task_dsq_type;
+  u64 last_kick_timestamp;
+};
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, u32);
+  __type(value, struct dispatch_ctx);
+} dispatch_state SEC(".maps");
 
 struct
 {

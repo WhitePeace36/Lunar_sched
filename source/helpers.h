@@ -86,6 +86,11 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
   return cpu_to_llc[cpu];
 }
 
+static __always_inline u64 getTickInterval_ns(void)
+{
+  return 1000000000ULL / CONFIG_HZ;
+}
+
 static __always_inline void creditVlag(struct task_ctx* context)
 {
   if (!context)
