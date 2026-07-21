@@ -57,8 +57,6 @@ sudo ./uninstall.sh
 
 ## Explanation
 
-The scheduler does only use FIFO queues and works without preemption. 
-
 It has 5 tiers. Which are: 
 
 1. LC which have a positive vlag and <= average runtime of 200us or KTHREADs with PRIO 100
