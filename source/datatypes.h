@@ -20,8 +20,11 @@ struct task_ctx
   u64 current_dsq_type;
   u64 runtime_avg;
   u64 current_runtime;
-  u64 last_yield_timestamp;
-  s64 vlag;
+  u64 blocked_at;
+  u64 runnable_at;
+  s64 duty;
+  u64 run_acc;
+  u64 sleep_acc;
   u64 last_run_granted_slice;
   bool first_runtime_avg_sample_taken;
   u64 started_at;
@@ -44,10 +47,10 @@ struct
 
 struct
 {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 4200000);
-  __type(key, u32);  // pid
+  __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+  __type(key, int);
   __type(value, struct task_ctx);
-} task_ctx_map SEC(".maps");
+} task_ctx_stor SEC(".maps");
 
 #endif  // DATATYPES_H

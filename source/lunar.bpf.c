@@ -42,37 +42,37 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
   {
     case DSQ_TYPE_LC:
       if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= ((RUNTIME_PRIO_BOUNDARY_LC + (RUNTIME_PRIO_BOUNDARY_LC * RUNTIME_THRESH_PERCENT) / 100))) ||
-          task_ctx->vlag < VLAG_DEMOTE_THRESH)
+          task_ctx->duty > DUTY_EDGE_LC + DUTY_HYST_LC)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
       }
       break;
     case DSQ_TYPE_INTERACTIVE:
-      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_LC)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_LC)) && task_ctx->duty < DUTY_EDGE_LC)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_LC;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE + ((RUNTIME_PRIO_BOUNDARY_INTERACTIVE * RUNTIME_THRESH_PERCENT) / 100))) ||
-               task_ctx->vlag < VLAG_DEMOTE_THRESH)
+               task_ctx->duty > DUTY_EDGE_INTERACTIVE + DUTY_HYST)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
       }
       break;
     case DSQ_TYPE_NORMAL:
-      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      if ((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_INTERACTIVE)) && task_ctx->duty < DUTY_EDGE_INTERACTIVE)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
       }
       else if ((task_ctx->first_runtime_avg_sample_taken &&
                 task_ctx->runtime_avg >= (RUNTIME_PRIO_BOUNDARY_NORMAL + ((RUNTIME_PRIO_BOUNDARY_NORMAL * RUNTIME_THRESH_PERCENT) / 100))) ||
-               task_ctx->vlag < VLAG_DEMOTE_THRESH)
+               task_ctx->duty > DUTY_EDGE_NORMAL + DUTY_HYST)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
       }
       break;
     case DSQ_TYPE_BATCH:
-      if (task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_NORMAL) && task_ctx->vlag > VLAG_PROMOTE_THRESH)
+      if (task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= (RUNTIME_PRIO_BOUNDARY_NORMAL) && task_ctx->duty < DUTY_EDGE_NORMAL)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_NORMAL;
       }
@@ -80,7 +80,7 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
     case DSQ_TYPE_GREEDY:
       if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg <= RUNTIME_PRIO_BOUNDARY_BATCH) ||
            (!task_ctx->first_runtime_avg_sample_taken && task_ctx->current_runtime <= RUNTIME_PRIO_BOUNDARY_BATCH)) &&
-          task_ctx->vlag > VLAG_PROMOTE_THRESH)
+          task_ctx->duty < DUTY_EDGE_BATCH)
       {
         task_ctx->current_dsq_type = DSQ_TYPE_BATCH;
       }
@@ -90,8 +90,8 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
   {
     if (((task_ctx->first_runtime_avg_sample_taken && task_ctx->runtime_avg >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100)) ||
          (!task_ctx->first_runtime_avg_sample_taken &&
-          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) &&
-        task_ctx->vlag < VLAG_DEMOTE_THRESH)
+          task_ctx->current_runtime >= RUNTIME_PRIO_BOUNDARY_BATCH + ((RUNTIME_PRIO_BOUNDARY_BATCH * RUNTIME_THRESH_PERCENT) / 100))) ||
+        task_ctx->duty > DUTY_EDGE_BATCH + DUTY_HYST)
     {
       task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
     }
@@ -188,32 +188,39 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
 
 s32 BPF_STRUCT_OPS(lunar_init_task, struct task_struct* p, struct scx_init_task_args* args)
 {
+  struct task_ctx* tctx;
   u64 now = bpf_ktime_get_ns();
-  struct task_ctx context_temp = {.runtime_avg = AVG_RUNTIME_START,
-                                  .current_runtime = 0,
-                                  .current_dsq_type = DSQ_TYPE_GREEDY,
-                                  .vlag = 200 * NS_PER_US,
-                                  .last_yield_timestamp = now,
-                                  .first_runtime_avg_sample_taken = false};
 
-  u32 pid = p->pid;
-  long ret = bpf_map_update_elem(&task_ctx_map, &pid, &context_temp, BPF_ANY);
-  if (ret)
+  tctx = bpf_task_storage_get(&task_ctx_stor, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
+  if (!tctx)
+    return -ENOMEM;
+
+  tctx->runtime_avg = AVG_RUNTIME_START;
+  tctx->current_runtime = 0;
+  tctx->current_dsq_type = DSQ_TYPE_GREEDY;
+  // tctx->vlag = 200 * NS_PER_US;
+  // tctx->last_yield_timestamp = now;
+  tctx->started_at = now;
+  tctx->first_runtime_avg_sample_taken = false;
+  tctx->run_acc = 9000000;   /* 9 ms   */
+  tctx->sleep_acc = 1240000; /* 1.24 ms → exactly 900 */
+
+  u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+  u32 cpu;
+  bpf_for(cpu, 0, nr_cpu_ids)
   {
-    return ret;
+    u32 key = 0;
+    struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
+    if (!dispatch_ctx)
+      return -ENOMEM;
+
+    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_GREEDY;
   }
 
-  return ret;
+  return 0;
 }
 
-void BPF_STRUCT_OPS(
-  lunar_exit_task,
-  struct task_struct* p,
-  struct scx_exit_task_args* args)
-{
-  u32 pid = p->pid;
-  bpf_map_delete_elem(&task_ctx_map, &pid);
-}
+void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args) { }
 
 s32 BPF_STRUCT_OPS(
   lunar_select_cpu,
@@ -237,11 +244,6 @@ void BPF_STRUCT_OPS(
   struct task_ctx* context = get_task_ctx(p);
   if (!context)
     return;
-
-  if (enq_flags & SCX_ENQ_WAKEUP)
-  {
-    creditVlag(context);
-  }
 
   u64 dsqType = context ? context->current_dsq_type : QUEUE_START;
   u32 cpu = scx_bpf_task_cpu(p);
@@ -269,11 +271,14 @@ void BPF_STRUCT_OPS(
   {
     u64 dl = dispatch_ctx->current_task_deadline;
     u64 now = bpf_ktime_get_ns();
-    if ((s64)(dl - now) > REMAINING_SLICE_NEEDED_FOR_PREEMPT /*&& (s64)(now - dispatch_ctx->last_kick_timestamp) >= PREEMPT_KICK_INTERVAL_LIMIT*/)
-    {
-      dispatch_ctx->last_kick_timestamp = now;
-      scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-    }
+    // if ((s64)(dl - now) > REMAINING_SLICE_NEEDED_FOR_PREEMPT /*||
+    //     dsqType <= DSQ_TYPE_INTERACTIVE &&
+    //       dispatch_ctx->current_task_dsq_type >= DSQ_TYPE_BATCH */
+    //     /*&& (s64)(now - dispatch_ctx->last_kick_timestamp) >= PREEMPT_KICK_INTERVAL_LIMIT*/)
+    // {
+    dispatch_ctx->last_kick_timestamp = now;
+    scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+    // }
   }
 }
 
@@ -301,15 +306,9 @@ void BPF_STRUCT_OPS(
 
   u64 used_ns = now - tctx->started_at;
 
-  tctx->vlag -= (s64)used_ns;
-  if (tctx->vlag < VLAG_MIN)
-    tctx->vlag = VLAG_MIN;
+  duty_account(tctx, used_ns, 0);
 
-  if (!runnable)
-  {
-    tctx->last_yield_timestamp = now;
-  }
-
+  tctx->duty = task_duty(tctx);
   update_task_prio(task, tctx, used_ns, runnable);
 }
 
@@ -342,11 +341,36 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
 
   dispatch_ctx->current_task_dsq_type = dsqType;
 
-  u64 offset = context->runtime_avg < getTickInterval_ns() ? context->runtime_avg : getTickInterval_ns();
-
   u64 now = bpf_ktime_get_ns();
-  dispatch_ctx->current_task_deadline = now + context->runtime_avg;
+  dispatch_ctx->current_task_deadline = now + context->last_run_granted_slice;
   context->started_at = now;
+}
+
+void BPF_STRUCT_OPS(lunar_quiescent, struct task_struct* p, u64 deq_flags)
+{
+  struct task_ctx* tctx = get_task_ctx(p);
+  if (!tctx)
+    return;
+
+  tctx->blocked_at = (deq_flags & SCX_DEQ_SLEEP) ? bpf_ktime_get_ns() : 0;
+}
+
+void BPF_STRUCT_OPS(lunar_runnable, struct task_struct* p, u64 enq_flags)
+{
+  struct task_ctx* tctx = get_task_ctx(p);
+  u64 now = bpf_ktime_get_ns();
+
+  if (!tctx)
+    return;
+
+  if (tctx->blocked_at)
+  {
+    duty_account(tctx, 0, now - tctx->blocked_at);
+    tctx->blocked_at = 0;
+    tctx->duty = task_duty(tctx);
+    update_task_dsq_type(p, tctx);
+  }
+  tctx->runnable_at = now;
 }
 
 SCX_OPS_DEFINE(lunar_ops,
@@ -354,6 +378,8 @@ SCX_OPS_DEFINE(lunar_ops,
                .init_task = (void*)lunar_init_task,
                .exit_task = (void*)lunar_exit_task,
                .select_cpu = (void*)lunar_select_cpu,
+               .runnable = (void*)lunar_runnable,
+               .quiescent = (void*)lunar_quiescent,
                .running = (void*)lunar_running,
                .enqueue = (void*)lunar_enqueue,
                .dispatch = (void*)lunar_dispatch,

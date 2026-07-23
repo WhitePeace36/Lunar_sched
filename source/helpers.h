@@ -76,8 +76,7 @@ static __always_inline bool is_high_prio_kthread_task(struct task_struct* p)
 
 static __always_inline struct task_ctx* get_task_ctx(struct task_struct* task)
 {
-  u32 pid = task->pid;
-  return bpf_map_lookup_elem(&task_ctx_map, &pid);
+  return bpf_task_storage_get(&task_ctx_stor, task, NULL, 0);
 }
 
 static __always_inline u32 cpu_llc_id(u32 cpu)
@@ -86,28 +85,50 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
   return cpu_to_llc[cpu];
 }
 
+static __always_inline u32 task_duty(const struct task_ctx* tctx)
+{
+  return (tctx->run_acc << 10) / (tctx->run_acc + tctx->sleep_acc + 1);
+}
+
+static __always_inline void duty_account(struct task_ctx* tctx, u64 run, u64 slept)
+{
+  if (run > DUTY_WINDOW_NS)
+    run = DUTY_WINDOW_NS;
+  if (slept > DUTY_WINDOW_NS)
+    slept = DUTY_WINDOW_NS;
+
+  tctx->run_acc += run;
+  tctx->sleep_acc += slept;
+
+  if (tctx->run_acc + tctx->sleep_acc > 2 * DUTY_WINDOW_NS)
+  {
+    tctx->run_acc >>= 1;
+    tctx->sleep_acc >>= 1;
+  }
+}
+
 static __always_inline u64 getTickInterval_ns(void)
 {
   return 1000000000ULL / CONFIG_HZ;
 }
 
-static __always_inline void creditVlag(struct task_ctx* context)
-{
-  if (!context)
-  {
-    return;
-  }
-  u64 now = bpf_ktime_get_ns();
-  u64 slept = now - context->last_yield_timestamp;
+// static __always_inline void creditVlag(struct task_ctx* context)
+// {
+//   if (!context)
+//   {
+//     return;
+//   }
+//   u64 now = bpf_ktime_get_ns();
+//   u64 slept = now - context->last_yield_timestamp;
 
-  s64 credit = (s64)(slept / SLEEP_CREDIT_DIVISOR);
-  if (credit > MAX_CREDITABLE_SLEEP)
-    credit = MAX_CREDITABLE_SLEEP;
+//   s64 credit = (s64)(slept / SLEEP_CREDIT_DIVISOR);
+//   if (credit > MAX_CREDITABLE_SLEEP)
+//     credit = MAX_CREDITABLE_SLEEP;
 
-  context->vlag += credit;
+//   context->vlag += credit;
 
-  if (context->vlag > VLAG_MAX)
-    context->vlag = VLAG_MAX;
-}
+//   if (context->vlag > VLAG_MAX)
+//     context->vlag = VLAG_MAX;
+// }
 
 #endif  // HELPERS_H
