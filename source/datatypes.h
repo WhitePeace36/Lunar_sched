@@ -28,6 +28,7 @@ struct task_ctx
   u64 last_run_granted_slice;
   bool first_runtime_avg_sample_taken;
   u64 started_at;
+  u64 duty_samples;
 };
 
 struct dispatch_ctx

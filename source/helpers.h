@@ -98,6 +98,10 @@ static __always_inline void duty_account(struct task_ctx* tctx, u64 run, u64 sle
     slept = DUTY_WINDOW_NS;
 
   tctx->run_acc += run;
+
+  if (tctx->run_acc > DUTY_WINDOW_NS)
+    tctx->run_acc = DUTY_WINDOW_NS;
+
   tctx->sleep_acc += slept;
 
   if (tctx->run_acc + tctx->sleep_acc > 2 * DUTY_WINDOW_NS)

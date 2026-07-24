@@ -28,7 +28,9 @@ static __always_inline u64 try_acquire_task_from_other_cpu(u64 dsqType, u32 cpu,
     if (!sameLLC && cpu_llc_id(other) == my_llc)
       continue;
 
-    if (scx_bpf_dsq_move_to_local(get_cpu_dsq_from_type(dsqType, other), 0))
+    u64 dsq = get_cpu_dsq_from_type(dsqType, other);
+
+    if (scx_bpf_dsq_nr_queued(dsq) && scx_bpf_dsq_move_to_local(dsq, 0))
       return dsqType;
   }
   return DSQ_TYPE_EMPTY;
@@ -36,47 +38,42 @@ static __always_inline u64 try_acquire_task_from_other_cpu(u64 dsqType, u32 cpu,
 
 static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
 {
-
-  if (scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_LC + cpu, 0))
+  if (scx_bpf_dsq_nr_queued(DSQ_CPU_QUEUE_BASE_LC + cpu) && scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_LC + cpu, 0))
   {
     return DSQ_TYPE_LC;
+  }
+  if (scx_bpf_dsq_nr_queued(DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu) && scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu, 0))
+  {
+    return DSQ_TYPE_INTERACTIVE;
+  }
+  if (scx_bpf_dsq_nr_queued(DSQ_CPU_QUEUE_BASE_NORMAL + cpu) && scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_NORMAL + cpu, 0))
+  {
+    return DSQ_TYPE_NORMAL;
+  }
+  if (scx_bpf_dsq_nr_queued(DSQ_CPU_QUEUE_BASE_BATCH + cpu) && scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_BATCH + cpu, 0))
+  {
+    return DSQ_TYPE_BATCH;
+  }
+  if (scx_bpf_dsq_nr_queued(DSQ_CPU_QUEUE_BASE_GREEDY + cpu) && scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_GREEDY + cpu, 0))
+  {
+    return DSQ_TYPE_GREEDY;
   }
 
   if (try_acquire_task_from_other_cpu(DSQ_TYPE_LC, cpu, true) != DSQ_TYPE_EMPTY)
   {
     return DSQ_TYPE_LC;
   }
-
-  if (scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu, 0))
-  {
-    return DSQ_TYPE_INTERACTIVE;
-  }
   if (try_acquire_task_from_other_cpu(DSQ_TYPE_INTERACTIVE, cpu, true) != DSQ_TYPE_EMPTY)
   {
     return DSQ_TYPE_INTERACTIVE;
-  }
-
-  if (scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_NORMAL + cpu, 0))
-  {
-    return DSQ_TYPE_NORMAL;
   }
   if (try_acquire_task_from_other_cpu(DSQ_TYPE_NORMAL, cpu, true) != DSQ_TYPE_EMPTY)
   {
     return DSQ_TYPE_NORMAL;
   }
-
-  if (scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_BATCH + cpu, 0))
-  {
-    return DSQ_TYPE_BATCH;
-  }
   if (try_acquire_task_from_other_cpu(DSQ_TYPE_BATCH, cpu, true) != DSQ_TYPE_EMPTY)
   {
     return DSQ_TYPE_BATCH;
-  }
-
-  if (scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_GREEDY + cpu, 0))
-  {
-    return DSQ_TYPE_GREEDY;
   }
   if (try_acquire_task_from_other_cpu(DSQ_TYPE_GREEDY, cpu, true) != DSQ_TYPE_EMPTY)
   {
@@ -126,7 +123,9 @@ static __always_inline u64 try_acquire_task_from_other_llc(u64 dsqType, u32 curr
     if (other == currentLLc)
       continue;
 
-    if (scx_bpf_dsq_move_to_local(get_llc_dsq_from_type(dsqType, other), 0))
+    u64 dsq = get_llc_dsq_from_type(dsqType, other);
+
+    if (scx_bpf_dsq_nr_queued(dsq) && scx_bpf_dsq_move_to_local(get_llc_dsq_from_type(dsqType, other), 0))
       return dsqType;
   }
   return DSQ_TYPE_EMPTY;
@@ -134,15 +133,15 @@ static __always_inline u64 try_acquire_task_from_other_llc(u64 dsqType, u32 curr
 
 static __always_inline u64 dispatch_dsq_per_llc(u32 llc)
 {
-  if (scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_LC + llc, 0))
+  if (scx_bpf_dsq_nr_queued(DSQ_LLC_QUEUE_BASE_LC + llc) && scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_LC + llc, 0))
     return DSQ_TYPE_LC;
-  if (scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc, 0))
+  if (scx_bpf_dsq_nr_queued(DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc) && scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc, 0))
     return DSQ_TYPE_INTERACTIVE;
-  if (scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_NORMAL + llc, 0))
+  if (scx_bpf_dsq_nr_queued(DSQ_LLC_QUEUE_BASE_NORMAL + llc) && scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_NORMAL + llc, 0))
     return DSQ_TYPE_NORMAL;
-  if (scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_BATCH + llc, 0))
+  if (scx_bpf_dsq_nr_queued(DSQ_LLC_QUEUE_BASE_BATCH + llc) && scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_BATCH + llc, 0))
     return DSQ_TYPE_BATCH;
-  if (scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_GREEDY + llc, 0))
+  if (scx_bpf_dsq_nr_queued(DSQ_LLC_QUEUE_BASE_GREEDY + llc) && scx_bpf_dsq_move_to_local(DSQ_LLC_QUEUE_BASE_GREEDY + llc, 0))
     return DSQ_TYPE_GREEDY;
 
   if (nr_llcs > 1)
