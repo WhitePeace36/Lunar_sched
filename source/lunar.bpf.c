@@ -37,7 +37,7 @@ static __always_inline u64 dispatch_with_fallback(u32 cpu)
 
 static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
 {
-  if (task_ctx->duty_samples < DUTY_SAMPLES_MIN)
+  if (task_ctx->duty_samples < DUTY_SAMPLES_NEEDED)
   {
     task_ctx->current_dsq_type = DSQ_TYPE_GREEDY;
   }
@@ -367,6 +367,10 @@ void BPF_STRUCT_OPS(lunar_runnable, struct task_struct* p, u64 enq_flags)
   {
     duty_account(tctx, 0, now - tctx->blocked_at);
     tctx->duty_samples++;
+    if (tctx->duty_samples > DUTY_SAMPLES_MAX)
+    {
+      tctx->duty_samples = DUTY_SAMPLES_MAX;
+    }
     tctx->blocked_at = 0;
     tctx->duty = task_duty(tctx);
     update_task_dsq_type(p, tctx);
