@@ -61,6 +61,9 @@ The scheduler works with accounting of duty.
 
 Duty goes from 0 to 1023.
 
+The higher the duty number the more the task hogs cpu power.
+The lower the more it is sleeping or dependent on io.
+
 The duty is calculated from a window of the last 100ms
 
 It is calculated like this.
