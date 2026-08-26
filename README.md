@@ -3,7 +3,7 @@
 
 ## Introduction
 
-Scx_lunar is a multipurpose scheduler which was originally invented with the goal to make frametimes in games as smooth as possible
+Scx_lunar is a multipurpose cpu scheduler which was originally invented with the goal to make frametimes in games as smooth as possible
 But then it grew a little and changed to a desktop usage focused scheduler which focuses on IO bound threads.
 
 Which makes the scheduler one of the best when it comes to responsiveness.
