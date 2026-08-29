@@ -18,7 +18,7 @@
 #define __bpf__
 #include "../vmlinux.h"
 #else
-#include "vmlinux.h"
+#include "../vmlinux.h"
 #endif
 
 #include <bpf/bpf_helpers.h>
