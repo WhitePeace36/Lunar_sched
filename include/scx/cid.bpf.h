@@ -14,7 +14,7 @@
 #ifndef __SCX_CID_BPF_H
 #define __SCX_CID_BPF_H
 
-#include "bpf_arena_common.bpf.h"
+#include "../bpf_arena_common.bpf.h"
 
 #ifndef BIT_U64
 #define BIT_U64(nr)		(1ULL << (nr))

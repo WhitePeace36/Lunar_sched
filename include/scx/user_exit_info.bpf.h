@@ -12,7 +12,7 @@
 #define __USER_EXIT_INFO_BPF_H
 
 #ifndef LSP
-#include "vmlinux.h"
+#include "../vmlinux.h"
 #endif
 #include <bpf/bpf_core_read.h>
 
