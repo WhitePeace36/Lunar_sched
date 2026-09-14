@@ -212,7 +212,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   return 0;
 }
 
-void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args) { }
+void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args)
+{
+  struct task_ctx* tctx = get_task_ctx(p);
+  if (tctx)
+  {
+    greedy_group_leave(tctx, p->tgid);
+  }
+}
 
 s32 BPF_STRUCT_OPS(
   lunar_select_cpu,
@@ -253,6 +260,31 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
     dsq = get_cpu_dsq_from_type(dsqType, cpu);
   }
   u64 slice = get_dsq_task_slice(dsqType);
+
+  if (dsqType == DSQ_TYPE_GREEDY)
+  {
+    u32 tgid = p->tgid;
+    barrier_var(tgid);
+
+    greedy_group_join(context, tgid);
+    struct greedy_group_ctx* g = bpf_map_lookup_elem(&greedy_group_stor, &tgid);
+    if (g && g->active_greedy_threads > 1)
+    {
+      u64 n = g->active_greedy_threads;
+      if (n > GREEDY_GROUP_CAP)
+        n = GREEDY_GROUP_CAP;
+      slice = slice / n;
+      if (slice < GREEDY_MIN_SLICE)
+        slice = GREEDY_MIN_SLICE;
+    }
+  }
+  else
+  {
+    u32 tgid = p->tgid;
+    barrier_var(tgid);
+    greedy_group_leave(context, tgid);
+  }
+
   context->last_run_granted_slice = slice;
   scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 
@@ -306,6 +338,7 @@ void BPF_STRUCT_OPS(
   if (!runnable)
   {
     dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
+    greedy_group_leave(tctx, task->tgid);
   }
 }
 

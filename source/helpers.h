@@ -135,4 +135,37 @@ static __always_inline u64 getTickInterval_ns(void)
 //     context->vlag = VLAG_MAX;
 // }
 
+static __always_inline struct greedy_group_ctx* get_or_create_greedy_group(u32 tgid)
+{
+  barrier_var(tgid);
+  struct greedy_group_ctx* g = bpf_map_lookup_elem(&greedy_group_stor, &tgid);
+  if (g)
+    return g;
+
+  struct greedy_group_ctx init = {};
+  bpf_map_update_elem(&greedy_group_stor, &tgid, &init, BPF_NOEXIST);
+  return bpf_map_lookup_elem(&greedy_group_stor, &tgid);
+}
+
+static __always_inline void greedy_group_join(struct task_ctx* tctx, u32 tgid)
+{
+  if (tctx->counted_in_greedy_group)
+    return;
+  struct greedy_group_ctx* g = get_or_create_greedy_group(tgid);
+  if (!g)
+    return;
+  __sync_fetch_and_add(&g->active_greedy_threads, 1);
+  tctx->counted_in_greedy_group = true;
+}
+
+static __always_inline void greedy_group_leave(struct task_ctx* tctx, u32 tgid)
+{
+  if (!tctx->counted_in_greedy_group)
+    return;
+  struct greedy_group_ctx* g = bpf_map_lookup_elem(&greedy_group_stor, &tgid);
+  if (g && g->active_greedy_threads > 0)
+    __sync_fetch_and_sub(&g->active_greedy_threads, 1);
+  tctx->counted_in_greedy_group = false;
+}
+
 #endif  // HELPERS_H

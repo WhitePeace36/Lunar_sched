@@ -29,6 +29,7 @@ struct task_ctx
   bool first_runtime_avg_sample_taken;
   u64 started_at;
   u64 duty_samples;
+  bool counted_in_greedy_group;
 };
 
 struct dispatch_ctx
@@ -37,6 +38,19 @@ struct dispatch_ctx
   u64 current_task_dsq_type;
   u64 last_kick_timestamp;
 };
+
+struct greedy_group_ctx
+{
+  u64 active_greedy_threads;
+};
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 4096);
+  __type(key, u32);  // tgid
+  __type(value, struct greedy_group_ctx);
+} greedy_group_stor SEC(".maps");
 
 struct
 {
