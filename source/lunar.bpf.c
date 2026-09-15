@@ -202,8 +202,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   tctx->runtime_avg = AVG_RUNTIME_START;
   tctx->current_runtime = 0;
   tctx->current_dsq_type = DSQ_TYPE_GREEDY;
-  // tctx->vlag = 200 * NS_PER_US;
-  // tctx->last_yield_timestamp = now;
   tctx->started_at = now;
   tctx->first_runtime_avg_sample_taken = false;
   tctx->run_acc = DUTY_WINDOW_NS;
@@ -266,8 +264,14 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
     u32 tgid = p->tgid;
     barrier_var(tgid);
 
-    greedy_group_join(context, tgid);
-    struct greedy_group_ctx* g = bpf_map_lookup_elem(&greedy_group_stor, &tgid);
+    greedy_group_join(context, dsq, tgid);
+
+    struct greedy_group_key key;
+    __builtin_memset(&key, 0, sizeof(key));
+    key.dsq_id = dsq;
+    key.tgid = tgid;
+
+    struct greedy_group_ctx* g = bpf_map_lookup_elem(&greedy_group_stor, &key);
     if (g && g->active_greedy_threads > 1)
     {
       u64 n = g->active_greedy_threads;
@@ -292,11 +296,8 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   {
     u64 dl = dispatch_ctx->current_task_deadline;
     u64 now = bpf_ktime_get_ns();
-    // if (now - dispatch_ctx->started_running_at >= MIN_RUN_BEFORE_PREEMPT)
-    // {
     dispatch_ctx->last_kick_timestamp = now;
     scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-    // }
   }
 }
 
@@ -375,8 +376,8 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   dispatch_ctx->current_task_deadline = now + context->last_run_granted_slice;
   context->started_at = now;
 
-  // bpf_printk("lunar_run cpu=%d pid=%d comm=%s dsq=%llu avg=%llu slice=%llu, duty=%llu run_acc=%llu sleep_acc=%llu", bpf_get_smp_processor_id(), p->pid, p->comm,
-  //            context->current_dsq_type, context->runtime_avg, context->last_run_granted_slice, context->duty, context->run_acc, context->sleep_acc);
+  // bpf_printk("lunar_run cpu=%d pid=%d tgid=%d comm=%s dsqType=%llu greedy=%d dsq_id=%llu slice=%llu duty=%llu", bpf_get_smp_processor_id(), p->pid, p->tgid, p->comm,
+  //            context->current_dsq_type, context->counted_in_greedy_group, context->counted_greedy_dsq, context->last_run_granted_slice, context->duty);
 }
 
 void BPF_STRUCT_OPS(lunar_quiescent, struct task_struct* p, u64 deq_flags)
