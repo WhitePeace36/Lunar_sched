@@ -162,21 +162,21 @@ static __always_inline void greedy_group_join(struct task_ctx* tctx, u64 dsq_id,
   tctx->counted_greedy_dsq = dsq_id;
 }
 
-static __always_inline void decrement_greedy_group_count(struct greedy_group_key* key)
-{
-  u64* count = bpf_map_lookup_elem(&greedy_group_store, key);
-  if (!count)
-    return;
+// static __always_inline void decrement_greedy_group_count(struct greedy_group_key* key)
+// {
+//   u64* count = bpf_map_lookup_elem(&greedy_group_store, key);
+//   if (!count)
+//     return;
 
-  if (*count == 0)
-  {
-    bpf_map_delete_elem(&greedy_group_store, key);
-  }
+//   if (*count == 0)
+//   {
+//     bpf_map_delete_elem(&greedy_group_store, key);
+//   }
 
-  u64 old = __sync_fetch_and_sub(count, 1);
-  if (old == 1)
-    bpf_map_delete_elem(&greedy_group_store, key);
-}
+//   u64 old = __sync_fetch_and_sub(count, 1);
+//   if (old == 1)
+//     bpf_map_delete_elem(&greedy_group_store, key);
+// }
 
 static __always_inline void greedy_group_leave(struct task_ctx* tctx, u32 tgid)
 {
@@ -190,7 +190,12 @@ static __always_inline void greedy_group_leave(struct task_ctx* tctx, u32 tgid)
   key.dsq_id = tctx->counted_greedy_dsq;
   key.tgid = tgid;
 
-  decrement_greedy_group_count(&key);
+  u64* count = bpf_map_lookup_elem(&greedy_group_store, &key);
+  if (count && *count > 0)
+  {
+    __sync_fetch_and_sub(count, 1);
+  }
+
   tctx->counted_in_greedy_group = false;
 }
 
