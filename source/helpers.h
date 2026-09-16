@@ -191,12 +191,17 @@ static __always_inline void greedy_group_leave(struct task_ctx* tctx, u32 tgid)
   key.tgid = tgid;
 
   u64* count = bpf_map_lookup_elem(&greedy_group_store, &key);
-  if (count && *count > 0)
+  if (!count)
   {
-    __sync_fetch_and_sub(count, 1);
+    return;
+  }
+  if (*count == 0)
+  {
+    tctx->counted_in_greedy_group = false;
+    return;
   }
 
-  tctx->counted_in_greedy_group = false;
+  __sync_fetch_and_sub(count, 1);
 }
 
 static __always_inline u64 greedy_group_slice(u64 dsq_id, u32 tgid)

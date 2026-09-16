@@ -261,20 +261,20 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   }
   u64 slice = get_dsq_task_slice(dsqType);
 
-if (dsqType == DSQ_TYPE_GREEDY)
-{
-  u32 tgid = p->tgid;
-  barrier_var(tgid);
+  if (dsqType == DSQ_TYPE_GREEDY)
+  {
+    u32 tgid = p->tgid;
+    barrier_var(tgid);
 
-  greedy_group_join(context, dsq, tgid);
-  slice = greedy_group_slice(dsq, tgid);
-}
-else
-{
-  u32 tgid = p->tgid;
-  barrier_var(tgid);
-  greedy_group_leave(context, tgid);
-}
+    greedy_group_join(context, dsq, tgid);
+    slice = greedy_group_slice(dsq, tgid);
+  }
+  else
+  {
+    u32 tgid = p->tgid;
+    barrier_var(tgid);
+    greedy_group_leave(context, tgid);
+  }
 
   context->last_run_granted_slice = slice;
   scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
