@@ -73,8 +73,9 @@ target_include_directories(lunar PRIVATE
 target_link_libraries(lunar PRIVATE ${LIBBPF_LIBRARIES})
 
 target_compile_options(lunar PRIVATE
-    -Wall -Wextra -Wpedantic -Wno-overlength-strings -fno-strict-aliasing -fwrapv -O3 -flto=thin -march=native
+    -Wall -Wextra -Wpedantic -Wno-overlength-strings -fno-strict-aliasing -fwrapv -O3 -flto=thin -march=native -Wno-unused-parameter -Wno-missing-declarations
 )
+
 target_link_options(lunar PRIVATE
     -flto=thin -fuse-ld=lld -march=native
 )
