@@ -27,6 +27,7 @@
 #include "user_exit_info.bpf.h"
 #include "enum_defs.autogen.h"
 #include "../bpf_arena_common.bpf.h"
+#include <include/lib/const-defs.h>
 
 #define PF_IDLE				0x00000002	/* I am an IDLE thread */
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */
@@ -107,7 +108,7 @@ void scx_bpf_events(struct scx_event_stats *events, size_t events__sz) __ksym __
 s32 scx_bpf_cpu_to_cid(s32 cpu) __ksym __weak;
 s32 scx_bpf_cid_to_cpu(s32 cid) __ksym __weak;
 void scx_bpf_cid_topo(s32 cid, struct scx_cid_topo *out) __ksym __weak;
-void scx_bpf_kick_cid(s32 cid, u64 flags) __ksym __weak;
+/* scx_bpf_kick_cid() is declared in compat.bpf.h */
 s32 scx_bpf_task_cid(const struct task_struct *p) __ksym __weak;
 s32 scx_bpf_this_cid(void) __ksym __weak;
 struct task_struct *scx_bpf_cid_curr(s32 cid) __ksym __weak;
@@ -115,7 +116,7 @@ u32 scx_bpf_nr_cids(void) __ksym __weak;
 u32 scx_bpf_nr_online_cids(void) __ksym __weak;
 u32 scx_bpf_cidperf_cap(s32 cid) __ksym __weak;
 u32 scx_bpf_cidperf_cur(s32 cid) __ksym __weak;
-s32 scx_bpf_cidperf_set(s32 cid, u32 perf) __ksym __weak;
+/* scx_bpf_cidperf_set() is declared in compat.bpf.h */
 
 /* sub-scheduler cap control, scx_bpf_sub_caps() cgroup_id 0 == self */
 s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps, const struct scx_cmask __arena *cmask__arena, struct scx_cmask __arena *denied_out__arena__nullable) __ksym __weak;
@@ -532,8 +533,8 @@ static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 /*
  * True if the non-sleepable BPF trampoline prolog (__bpf_prog_enter) calls
  * migrate_disable() for the current task. Recorded once by
- * scx_lib_init_probe, an fentry program on bpf_scx_reg() that fires during
- * the natural scheduler-attach call chain (auto-attached by scx_ops_attach!).
+ * scx_lib_init_probe, an fentry program that fires during the natural
+ * scheduler-attach call chain (auto-attached by scx_ops_attach!).
  *
  * Defaults to false (conservative). Over-reporting in is_migration_disabled()
  * causes local-only dispatch, which is safe. Under-reporting can crash the
@@ -550,13 +551,20 @@ bool __scx_prolog_disables_migration __weak = false;
  * ops.init() fires. Its address is taken in the vtable, so the symbol
  * is non-inlinable and has been stable since introduction.
  *
+ * A cid-form scheduler registers through bpf_scx_reg_cid(), the .reg
+ * callback of bpf_sched_ext_ops_cid, and so never enters bpf_scx_reg().
+ * The cid-form open paths (SCX_OPS_CID_OPEN(), scx_ops_cid_open!())
+ * therefore repoint this program at bpf_scx_reg_cid(). Repointing rather
+ * than adding a second program keeps the object loadable on kernels
+ * predating the cid form, where bpf_scx_reg_cid() has no BTF entry.
+ *
  * Entering via fentry runs us through __bpf_prog_enter -- the
  * non-sleepable prolog that consumers of is_migration_disabled() live
  * under.
  *
  * Loud warning: the prolog adds at most 1 to migration_disabled.
  * Reading > 1 means something upstream in the
- * bpf_struct_ops_link_create -> bpf_scx_reg path disabled migration
+ * bpf_struct_ops_link_create -> .reg path disabled migration
  * before the prolog ran, invalidating the probe; audit and adjust.
  */
 SEC("fentry/bpf_scx_reg") __weak
