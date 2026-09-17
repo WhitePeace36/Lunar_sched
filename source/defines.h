@@ -22,23 +22,18 @@
 #define SLICE_BATCH (500 * NS_PER_US)
 #define SLICE_GREEDY (500 * NS_PER_US)
 
-#define GREEDY_GROUP_CAP 16                // don't divide the slice by more than this
-#define GREEDY_MIN_SLICE (50 * NS_PER_US)  // floor so slices don't collapse to nothing
+#define GROUP_CAP 16                // don't divide the slice by more than this
+#define MIN_SLICE (50 * NS_PER_US)  // floor so slices don't collapse to nothing
 
 #define RUNTIME_PRIO_BOUNDARY_LC (50 * NS_PER_US)
 #define RUNTIME_PRIO_BOUNDARY_INTERACTIVE (500 * NS_PER_US)
 #define RUNTIME_PRIO_BOUNDARY_NORMAL (2000 * NS_PER_US)
 #define RUNTIME_PRIO_BOUNDARY_BATCH (8000 * NS_PER_US)
 
-#define VLAG_PRIO_BOUNDARY_LC (12 * NS_PER_MS_LL)
-#define VLAG_PRIO_BOUNDARY_INTERACTIVE (8 * NS_PER_MS_LL)
-#define VLAG_PRIO_BOUNDARY_NORMAL (4 * NS_PER_MS_LL)
-#define VLAG_PRIO_BOUNDARY_BATCH (0 * NS_PER_MS_LL)
 
 #define MIN_RUN_BEFORE_PREEMPT 20000LL
 
 #define RUNTIME_THRESH_PERCENT 5LL
-#define VLAG_THRESH_PERCENT 5LL
 
 #define DUTY_WINDOW_NS (100ULL * NS_PER_MS)
 #define TASK_CLASSIFICATION_AGE_NS (50ULL * NS_PER_MS)
@@ -71,11 +66,7 @@
 #define DSQ_PRIO_QUEUE_AMOUNT 5
 #define DSQ_TYPE_EMPTY 6
 
-#define VLAG_PROMOTE_THRESH 2000000LL
-#define VLAG_DEMOTE_THRESH -2000000LL
 
-#define VLAG_MIN -14000000LL
-#define VLAG_MAX 14000000LL
 #define SLEEP_CREDIT_DIVISOR 1LL
 #define MAX_CREDITABLE_SLEEP 100000000LL
 

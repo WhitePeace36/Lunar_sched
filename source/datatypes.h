@@ -29,8 +29,9 @@ struct task_ctx
   u64 started_at;
   u64 duty_samples;
   u64 last_run_granted_slice;
-  bool counted_in_greedy_group;
-  u64 counted_greedy_dsq;
+  bool counted_in_group;
+  u64 counted_cpu;
+  u64 counted_dsqType;
 };
 
 struct dispatch_ctx
@@ -39,19 +40,19 @@ struct dispatch_ctx
   u64 last_kick_timestamp;
 };
 
-struct greedy_group_key
+struct group_key
 {
-  u64 dsq_id;
+  u64 dsqType;
   u32 tgid;
 };
 
 struct
 {
-  __uint(type, BPF_MAP_TYPE_LRU_HASH);
-  __uint(max_entries, 1048576);
-  __type(key, struct greedy_group_key);
+  __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+  __uint(max_entries, 16384);
+  __type(key, struct group_key);
   __type(value, u64);
-} greedy_group_store SEC(".maps");
+} group_map SEC(".maps");
 
 struct
 {

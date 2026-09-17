@@ -206,19 +206,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   tctx->first_runtime_avg_sample_taken = false;
   tctx->run_acc = DUTY_WINDOW_NS;
   tctx->sleep_acc = 0;
+  tctx->counted_in_group = false;
+  tctx->counted_cpu = 0;
+  tctx->counted_dsqType = DSQ_TYPE_EMPTY;
 
   return 0;
 }
 
 void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args)
 {
-  struct task_ctx* tctx = get_task_ctx(p);
-  if (tctx)
-  {
-    u32 tgid = p->tgid;
-    barrier_var(tgid);
-    greedy_group_leave(tctx, tgid);
-  }
 }
 
 s32 BPF_STRUCT_OPS(
@@ -261,21 +257,6 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   }
   u64 slice = get_dsq_task_slice(dsqType);
 
-  if (dsqType == DSQ_TYPE_GREEDY)
-  {
-    u32 tgid = p->tgid;
-    barrier_var(tgid);
-
-    greedy_group_join(context, dsq, tgid);
-    slice = greedy_group_slice(dsq, tgid);
-  }
-  else
-  {
-    u32 tgid = p->tgid;
-    barrier_var(tgid);
-    greedy_group_leave(context, tgid);
-  }
-
   context->last_run_granted_slice = slice;
   scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 
@@ -316,19 +297,16 @@ void BPF_STRUCT_OPS(
   tctx->duty = task_duty(tctx);
   update_task_prio(task, tctx, used_ns, runnable);
 
-  u32 cpu = scx_bpf_task_cpu(task);
-  u32 key = 0;
-  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
-  if (!dispatch_ctx)
-    return;
-
   if (!runnable)
   {
-    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
+    u32 key = 0;
+    struct dispatch_ctx *dispatch_ctx = bpf_map_lookup_elem(&dispatch_state, &key);
+    if (!dispatch_ctx)
+      return;
 
-    u32 tgid = task->tgid;
-    barrier_var(tgid);
-    greedy_group_leave(tctx, tgid);
+    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
+    
+    group_leave(tctx, task->tgid);
   }
 }
 
@@ -348,11 +326,8 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   if (!context)
     return;
 
-  u32 cpu = bpf_get_smp_processor_id();
-  //u32 cpu = scx_bpf_task_cpu(p);
-
   u32 key = 0;
-  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
+  struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_elem(&dispatch_state, &key);
   if (!dispatch_ctx)
     return;
 
@@ -362,21 +337,10 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
 
   dispatch_ctx->current_task_dsq_type = dsqType;
 
-  u64 slice = context->last_run_granted_slice;
-
-  if (dsqType == DSQ_TYPE_GREEDY)
-  {
-    u32 tgid = p->tgid;
-    barrier_var(tgid);
-
-    u64 real_dsq = get_greedy_dsq_for_cpu(cpu);
-
-    greedy_group_join(context, real_dsq, tgid);
-    slice = greedy_group_slice(real_dsq, tgid);
-    p->scx.slice = slice;
-  }
-
+  group_join(context, p->tgid);
+  u64 slice = group_slice(context->current_dsq_type, p->tgid);
   context->last_run_granted_slice = slice;
+  p->scx.slice = slice;
 
   u64 now = bpf_ktime_get_ns();
   context->started_at = now;
