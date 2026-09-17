@@ -18,21 +18,7 @@ UEI_DEFINE(uei);
 
 static __always_inline u64 dispatch_with_fallback(u32 cpu)
 {
-  switch (schedulerMode)
-  {
-    case SCHED_MODE_DSQ_PER_LLC:
-    {
-      u32 llc = cpu_llc_id(cpu);
-      return dispatch_dsq_per_llc(llc);
-      break;
-    }
-
-    case SCHED_MODE_DSQ_PER_CPU:
-      return dispatch_dsq_per_cpu(cpu);
-      break;
-  }
-
-  return DSQ_TYPE_EMPTY;
+  return dispatch_dsq_per_cpu(cpu);
 }
 
 static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* task_ctx)
@@ -157,25 +143,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
     if (ret)
       return ret;
   }
-  u32 llc;
-  bpf_for(llc, 0, nr_llcs)
-  {
-    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_LC + llc, -1);
-    if (ret)
-      return ret;
-    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_NORMAL + llc, -1);
-    if (ret)
-      return ret;
-    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_BATCH + llc, -1);
-    if (ret)
-      return ret;
-    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc, -1);
-    if (ret)
-      return ret;
-    ret = scx_bpf_create_dsq(DSQ_LLC_QUEUE_BASE_GREEDY + llc, -1);
-    if (ret)
-      return ret;
-  }
 
   bpf_for(cpu, 0, nr_cpu_ids)
   {
@@ -245,16 +212,8 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   if (!dispatch_ctx)
     return;
 
-  u64 dsq;
-  if (schedulerMode == SCHED_MODE_DSQ_PER_LLC)
-  {
-    u32 llc = cpu_llc_id(cpu);
-    dsq = get_llc_dsq_from_type(dsqType, llc);
-  }
-  else
-  {
-    dsq = get_cpu_dsq_from_type(dsqType, cpu);
-  }
+  u64 dsq = get_cpu_dsq_from_type(dsqType, cpu);
+
   u64 slice = get_dsq_task_slice(dsqType);
 
   context->last_run_granted_slice = slice;

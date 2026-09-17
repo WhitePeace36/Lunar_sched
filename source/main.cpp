@@ -6,19 +6,6 @@
 #include <atomic>
 #include <thread>
 
-enum scheduler_mode : std::uint32_t
-{
-  SCHED_MODE_DSQS_PER_LLC = 0,
-  SCHED_MODE_DSQS_PER_CPU = 1,
-};
-
-enum ParameterStatus : std::uint32_t
-{
-  Ok,
-  Error,
-  Help,
-};
-
 typedef uint64_t u64;
 typedef int64_t s64;
 typedef uint32_t u32;
@@ -28,7 +15,6 @@ typedef int16_t s16;
 typedef uint8_t u8;
 typedef int8_t s8;
 
-#include "mode_parsing.h"
 #include "lunar_topology.h"
 
 using namespace std;
@@ -54,12 +40,6 @@ int main(int argc, const char** argv)
   int err = 0;
 
   lunar_bpf* skel{nullptr};
-  scheduler_mode mode{SCHED_MODE_DSQS_PER_CPU};
-
-  if (parseParameters(argc, argv, mode) != Ok)
-  {
-    return 0;
-  }
 
   skel = lunar_bpf__open();
   if (!skel)
@@ -68,7 +48,6 @@ int main(int argc, const char** argv)
     return 1;
   }
   SCX_ENUM_INIT(skel);
-  skel->rodata->schedulerMode = mode;
 
   if (!setup_lunar_topology(skel))
   {
@@ -86,9 +65,6 @@ int main(int argc, const char** argv)
   }
 
   std::cerr << "Successfully opened and loaded the lunar scheduler." << std::endl;
-
-  const char* mode_name = (mode == SCHED_MODE_DSQS_PER_LLC) ? "dsqs_per_LLC" : "dsqs_per_cpu";
-  std::cout << "Scheduler mode: " << mode_name << std::endl;
 
   std::cout << "Attaching sched_ext scheduler..." << std::endl;
 

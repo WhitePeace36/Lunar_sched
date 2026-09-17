@@ -40,7 +40,6 @@ set(lunarHeader
     dispatches.h
     helpers.h
     lunar_topology.h
-    mode_parsing.h
 )
 add_custom_command(
     OUTPUT ${BPF_SKEL}

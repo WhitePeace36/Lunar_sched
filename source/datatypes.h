@@ -11,7 +11,6 @@
 
 const volatile u32 nr_llcs = 1;
 const volatile u32 cpu_to_llc[MAX_CPUS] = {};
-const volatile u32 schedulerMode = SCHED_MODE_DSQ_PER_CPU;
 
 extern const int CONFIG_HZ __kconfig;
 

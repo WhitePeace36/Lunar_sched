@@ -46,24 +46,6 @@ static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
   return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
 }
 
-static __always_inline u64 get_llc_dsq_from_type(u64 dsqType, u32 llc)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return DSQ_LLC_QUEUE_BASE_LC + llc;
-    case DSQ_TYPE_INTERACTIVE:
-      return DSQ_LLC_QUEUE_BASE_INTERACTIVE + llc;
-    case DSQ_TYPE_NORMAL:
-      return DSQ_LLC_QUEUE_BASE_NORMAL + llc;
-    case DSQ_TYPE_BATCH:
-      return DSQ_LLC_QUEUE_BASE_BATCH + llc;
-    case DSQ_TYPE_GREEDY:
-      return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
-  }
-  return DSQ_LLC_QUEUE_BASE_GREEDY + llc;
-}
-
 static __always_inline bool is_kthread(const struct task_struct* p)
 {
   return p->flags & PF_KTHREAD;
