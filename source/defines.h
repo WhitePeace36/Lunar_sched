@@ -19,11 +19,11 @@
 #define SLICE_LC (500 * NS_PER_US)
 #define SLICE_INTERACTIVE (500 * NS_PER_US)
 #define SLICE_NORMAL (500 * NS_PER_US)
-#define SLICE_BATCH (500 * NS_PER_US)
-#define SLICE_GREEDY (500 * NS_PER_US)
+#define SLICE_BATCH (1000 * NS_PER_US)
+#define SLICE_GREEDY (2000 * NS_PER_US)
 
-#define GROUP_CAP 16                // don't divide the slice by more than this
-#define MIN_SLICE (50 * NS_PER_US)  // floor so slices don't collapse to nothing
+// #define GROUP_CAP 16                // don't divide the slice by more than this
+#define MIN_SLICE (100 * NS_PER_US)  // floor so slices don't collapse to nothing
 
 #define RUNTIME_PRIO_BOUNDARY_LC (50 * NS_PER_US)
 #define RUNTIME_PRIO_BOUNDARY_INTERACTIVE (500 * NS_PER_US)

@@ -174,7 +174,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   tctx->run_acc = DUTY_WINDOW_NS;
   tctx->sleep_acc = 0;
   tctx->counted_in_group = false;
-  tctx->counted_cpu = 0;
+  tctx->counted_cpu = -1;
   tctx->counted_dsqType = DSQ_TYPE_EMPTY;
 
   return 0;
@@ -297,7 +297,7 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   dispatch_ctx->current_task_dsq_type = dsqType;
 
   group_join(context, p->tgid);
-  u64 slice = group_slice(context->current_dsq_type, p->tgid);
+  u64 slice = calc_slice(context->current_dsq_type, p->tgid);
   context->last_run_granted_slice = slice;
   p->scx.slice = slice;
 
