@@ -2,12 +2,13 @@
 Description=lunar adaptive Linux scheduler (sched_ext)
 After=multi-user.target
 ConditionPathExists=/sys/kernel/sched_ext
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/lunar
 Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <signal.h>
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 typedef uint64_t u64;
@@ -27,12 +28,15 @@ using namespace std;
 
 std::atomic<bool> stop{};
 
-static void sig_handler(int)
+static void sig_handler(
+  int)
 {
   stop = true;
 }
 
-int main(int argc, const char** argv)
+int main(
+  int argc,
+  const char** argv)
 {
   signal(SIGINT, sig_handler);
   signal(SIGTERM, sig_handler);
@@ -48,6 +52,10 @@ int main(int argc, const char** argv)
     return 1;
   }
   SCX_ENUM_INIT(skel);
+
+  skel->struct_ops.lunar_ops->hotplug_seq = scx_hotplug_seq();
+
+  UEI_SET_SIZE(skel, lunar_ops, uei);
 
   if (!setup_lunar_topology(skel))
   {
@@ -78,13 +86,22 @@ int main(int argc, const char** argv)
 
   std::cout << "lunar scheduler is successfully running!" << std::endl;
 
+  bool ejected = false;
   while (!stop)
   {
+    if (UEI_EXITED(skel, uei))
+    {
+      ejected = true;
+      break;
+    }
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+
+  if (ejected)
+    UEI_REPORT(skel, uei);
 
   std::cout << "Shutting down and restoring default kernel scheduler..." << std::endl;
   lunar_bpf__destroy(skel);
 
-  return 0;
+  return ejected ? 1 : 0;
 }

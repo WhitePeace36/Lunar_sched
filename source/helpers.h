@@ -20,8 +20,6 @@ static __always_inline u64 get_dsq_task_slice(u64 dsqType)
       return SLICE_INTERACTIVE;
     case DSQ_TYPE_NORMAL:
       return SLICE_NORMAL;
-    case DSQ_TYPE_BATCH:
-      return SLICE_BATCH;
     case DSQ_TYPE_GREEDY:
       return SLICE_GREEDY;
   }
@@ -38,8 +36,6 @@ static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
       return DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu;
     case DSQ_TYPE_NORMAL:
       return DSQ_CPU_QUEUE_BASE_NORMAL + cpu;
-    case DSQ_TYPE_BATCH:
-      return DSQ_CPU_QUEUE_BASE_BATCH + cpu;
     case DSQ_TYPE_GREEDY:
       return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
   }
@@ -96,129 +92,5 @@ static __always_inline void duty_account(struct task_ctx* tctx, u64 run, u64 sle
 static __always_inline u64 getTickInterval_ns(void)
 {
   return 1000000000ULL / CONFIG_HZ;
-}
-
-static __always_inline u64* get_or_create_local_counter(struct group_key* key)
-{
-  u64* count = bpf_map_lookup_elem(&group_map, key);
-  if (count)
-    return count;
-
-  u64 countNew = 0;
-  bpf_map_update_elem(&group_map, key, &countNew, BPF_NOEXIST);
-  return bpf_map_lookup_elem(&group_map, key);
-}
-
-static __always_inline void group_join(struct task_ctx *tctx, u32 tgid)
-{
-  u32 local_cpu = bpf_get_smp_processor_id();
-
-  barrier_var(tgid);
-
-  if (tctx->counted_in_group && (tctx->counted_cpu != local_cpu || tctx->counted_dsqType != tctx->current_dsq_type))
-  {
-    struct group_key key_old;
-    __builtin_memset(&key_old, 0, sizeof(key_old));
-    key_old.dsqType = tctx->counted_dsqType;
-    key_old.tgid = tgid;
-
-    u64 *other_count = bpf_map_lookup_percpu_elem(&group_map, &key_old, tctx->counted_cpu);
-    if (other_count && *other_count > 0)
-    {
-      __sync_fetch_and_sub(other_count, 1);
-    }
-    tctx->counted_dsqType = DSQ_TYPE_EMPTY;
-    tctx->counted_in_group = false;
-    tctx->counted_cpu = -1;
-  }
-
-  if (!tctx->counted_in_group && (tctx->current_dsq_type == DSQ_TYPE_BATCH || tctx->current_dsq_type == DSQ_TYPE_GREEDY))
-  {
-    struct group_key key_new;
-    __builtin_memset(&key_new, 0, sizeof(key_new));
-    key_new.dsqType = tctx->current_dsq_type;
-    key_new.tgid = tgid;
-
-    u64* local_count = get_or_create_local_counter(&key_new);
-    if (local_count)
-    {
-      __sync_fetch_and_add(local_count, 1);
-      tctx->counted_dsqType = tctx->current_dsq_type;
-      tctx->counted_in_group = true;
-      tctx->counted_cpu = local_cpu;
-    }
-    else
-    {
-      tctx->counted_dsqType = DSQ_TYPE_EMPTY;
-      tctx->counted_in_group = false;
-      tctx->counted_cpu = -1;
-    }
-  }
-}
-
-static __always_inline void group_leave(struct task_ctx* tctx, u32 tgid)
-{
-  if (!tctx->counted_in_group)
-  {
-    return;
-  }
-
-  barrier_var(tgid);
-
-  struct group_key key;
-  __builtin_memset(&key, 0, sizeof(key));
-  key.dsqType = tctx->counted_dsqType;
-  key.tgid = tgid;
-
-  u64* count = bpf_map_lookup_elem(&group_map, &key);
-  if (count && *count > 0)
-  {
-    __sync_fetch_and_sub(count, 1);
-  }
-
-  tctx->counted_in_group = false;
-  tctx->counted_cpu = -1;
-  tctx->counted_dsqType = DSQ_TYPE_EMPTY;
-}
-
-static __always_inline u64 calc_slice(u64 dsqType, u32 tgid)
-{
-  barrier_var(tgid);
-
-  const u64 defaultSlice = get_dsq_task_slice(dsqType);
-  u64 slice = defaultSlice;
-  u64 amountTasks = 0;
-
-  u32 cpu = bpf_get_smp_processor_id();
-  u64 nr_queued = scx_bpf_dsq_nr_queued(get_cpu_dsq_from_type(dsqType, cpu));
-  if (nr_queued > amountTasks)
-  {
-    amountTasks = nr_queued;
-  }
-
-  if (amountTasks > 1)
-  {
-    u64 slice_tgid = defaultSlice / amountTasks;
-
-    if (dsqType == DSQ_TYPE_GREEDY || dsqType == DSQ_TYPE_BATCH)
-    {
-      struct group_key key;
-      __builtin_memset(&key, 0, sizeof(key));
-      key.dsqType = dsqType;
-      key.tgid = tgid;
-      u64* count = bpf_map_lookup_elem(&group_map, &key);
-      if (count && *count > 1)
-      {
-        slice_tgid = slice_tgid / *count;
-      }
-    }
-    if (slice_tgid < MIN_SLICE)
-    {
-      slice_tgid = MIN_SLICE;
-    }
-    slice = slice_tgid;
-  }
-
-  return slice;
 }
 #endif  // HELPERS_H

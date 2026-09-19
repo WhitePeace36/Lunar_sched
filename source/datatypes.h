@@ -17,20 +17,14 @@ extern const int CONFIG_HZ __kconfig;
 struct task_ctx
 {
   u64 current_dsq_type;
-  u64 runtime_avg;
-  u64 current_runtime;
   u64 blocked_at;
   u64 runnable_at;
   s64 duty;
   u64 run_acc;
   u64 sleep_acc;
-  bool first_runtime_avg_sample_taken;
   u64 started_at;
   u64 duty_samples;
   u64 last_run_granted_slice;
-  bool counted_in_group;
-  u64 counted_cpu;
-  u64 counted_dsqType;
 };
 
 struct dispatch_ctx
@@ -38,20 +32,6 @@ struct dispatch_ctx
   u64 current_task_dsq_type;
   u64 last_kick_timestamp;
 };
-
-struct group_key
-{
-  u64 dsqType;
-  u32 tgid;
-};
-
-struct
-{
-  __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
-  __uint(max_entries, 16384);
-  __type(key, struct group_key);
-  __type(value, u64);
-} group_map SEC(".maps");
 
 struct
 {

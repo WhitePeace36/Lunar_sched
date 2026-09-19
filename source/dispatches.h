@@ -50,10 +50,6 @@ static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
   {
     return DSQ_TYPE_NORMAL;
   }
-  if (scx_bpf_dsq_nr_queued(DSQ_CPU_QUEUE_BASE_BATCH + cpu) && scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_BATCH + cpu, 0))
-  {
-    return DSQ_TYPE_BATCH;
-  }
   if (scx_bpf_dsq_nr_queued(DSQ_CPU_QUEUE_BASE_GREEDY + cpu) && scx_bpf_dsq_move_to_local(DSQ_CPU_QUEUE_BASE_GREEDY + cpu, 0))
   {
     return DSQ_TYPE_GREEDY;
@@ -70,10 +66,6 @@ static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
   if (try_acquire_task_from_other_cpu(DSQ_TYPE_NORMAL, cpu, true) != DSQ_TYPE_EMPTY)
   {
     return DSQ_TYPE_NORMAL;
-  }
-  if (try_acquire_task_from_other_cpu(DSQ_TYPE_BATCH, cpu, true) != DSQ_TYPE_EMPTY)
-  {
-    return DSQ_TYPE_BATCH;
   }
   if (try_acquire_task_from_other_cpu(DSQ_TYPE_GREEDY, cpu, true) != DSQ_TYPE_EMPTY)
   {
@@ -95,11 +87,6 @@ static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
     if (try_acquire_task_from_other_cpu(DSQ_TYPE_NORMAL, cpu, false) != DSQ_TYPE_EMPTY)
     {
       return DSQ_TYPE_NORMAL;
-    }
-
-    if (try_acquire_task_from_other_cpu(DSQ_TYPE_BATCH, cpu, false) != DSQ_TYPE_EMPTY)
-    {
-      return DSQ_TYPE_BATCH;
     }
 
     if (try_acquire_task_from_other_cpu(DSQ_TYPE_GREEDY, cpu, false) != DSQ_TYPE_EMPTY)
