@@ -74,11 +74,10 @@ The Tier are calculated as Percent of the 1024 max duty value.
 
 It has 5 tiers. Which are: 
 
-1. LC with duty <= 5%
-2. INTERACTIVE with duty <= 20%
-3. NORMAL with duty <= 40%
-4. BATCH with duty <= 90%
-5. GREEDY with duty <= 100%
+1. LC with duty <= 13%
+2. INTERACTIVE with duty <= 25%
+3. NORMAL with duty <= 50%
+4. GREEDY with duty <= 100%
 
 All new tasks get thrown into greedy. And start with duty of 1023.
 There is also a min. sample rate of the duty value to be eligible for promotion into higher tiers. 
