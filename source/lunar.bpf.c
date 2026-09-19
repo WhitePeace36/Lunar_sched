@@ -41,10 +41,6 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
   }
 
   u64 cur = task_ctx->current_dsq_type;
-
-  // Bias the duty against whichever direction we are considering moving in.
-  // Promote only if the task still looks important when judged pessimistically;
-  // demote only if it still looks unimportant when judged optimistically.
   u64 pessimistic = tier_from_duty(task_ctx->duty + DUTY_HYST);
   u64 optimistic = tier_from_duty(task_ctx->duty - DUTY_HYST);
 
@@ -63,8 +59,6 @@ static __always_inline void update_task_prio(struct task_struct* task, struct ta
 
   update_task_dsq_type(task, task_ctx);
 }
-
-// callbacks
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
 {
@@ -95,7 +89,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
     if (!dispatch_ctx)
       return -ENOMEM;
 
-    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_GREEDY;
+    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
   }
 
   return 0;
@@ -121,9 +115,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
     struct task_struct* cur = bpf_get_current_task_btf();
     struct task_struct* parent = p->real_parent;
 
-    // CLONE_THREAD sets p->real_parent to the creator's parent, not the
-    // creator, so a real_parent match only ever catches fork(). A new thread
-    // shares its creator's tgid, which catches pthread_create().
     bool from_creator = cur && ((parent && cur->pid == parent->pid) || cur->tgid == p->tgid);
 
     if (from_creator)
