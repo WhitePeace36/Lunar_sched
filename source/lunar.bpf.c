@@ -90,13 +90,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
       return -ENOMEM;
 
     dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
+
+    u64 now = bpf_ktime_get_ns();
+    dispatch_ctx->tier_head_ts[DSQ_TYPE_INTERACTIVE] = now;
+    dispatch_ctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
+    dispatch_ctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
+    dispatch_ctx->last_override_ts = now;
   }
 
   return 0;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_init_task_args* args)
-{  
+{
   struct task_ctx* tctx;
   u64 now = bpf_ktime_get_ns();
 
@@ -132,15 +138,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   return 0;
 }
 
-void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args)
-{
-}
+void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task_args* args) { }
 
-s32 BPF_STRUCT_OPS(
-  lunar_select_cpu,
-  struct task_struct* p,
-  s32 prev_cpu,
-  u64 wake_flags)
+s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wake_flags)
 {
   struct task_ctx* context = get_task_ctx(p);
   if (!context)
@@ -157,40 +157,45 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   u64 dsqType = context ? context->current_dsq_type : QUEUE_START;
   u32 cpu = scx_bpf_task_cpu(p);
 
-  u64 dsq = get_cpu_dsq_from_type(dsqType, cpu);
-
-  u64 slice = get_dsq_task_slice(dsqType);
-
-  if (context)
-    context->last_run_granted_slice = slice;
-
-  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
-
   u32 key = 0;
   struct dispatch_ctx* dispatch_ctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
   if (!dispatch_ctx)
     return;
 
+  u64 dsq = get_cpu_dsq_from_type(dsqType, cpu);
+  u64 slice = get_dsq_task_slice(dsqType);
+
+  u64 now = bpf_ktime_get_ns();
+
+  // A tier only needs an arrival timestamp for starvation tracking once it
+  // goes empty -> non-empty; while it stays continuously non-empty, the
+  // original timestamp is exactly the signal we want ("how long has this
+  // tier been crowded out without a gap").
+  if (dsqType != DSQ_TYPE_LC && scx_bpf_dsq_nr_queued(dsq) == 0)
+  {
+    stamp_tier_head_ts(dispatch_ctx, dsqType, now);
+  }
+
+  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
+
   if (enq_flags & SCX_ENQ_WAKEUP && dispatch_ctx->current_task_dsq_type > dsqType)
   {
-    u64 now = bpf_ktime_get_ns();
-    dispatch_ctx->last_kick_timestamp = now;
-    scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+    bool is_protected = /*dispatch_ctx->current_task_is_override &&*/ (now - dispatch_ctx->current_task_run_started) < MIN_RUN_BEFORE_PREEMPT;
+
+    if (!is_protected)
+    {
+      dispatch_ctx->last_kick_timestamp = now;
+      scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+    }
   }
 }
 
-void BPF_STRUCT_OPS(
-  lunar_dispatch,
-  s32 cpu,
-  struct task_struct* prev)
+void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
 {
   dispatch_with_fallback(cpu);
 }
 
-void BPF_STRUCT_OPS(
-  lunar_stopping,
-  struct task_struct* task,
-  bool runnable)
+void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
 {
   u64 now = bpf_ktime_get_ns();
   if (!task)
@@ -214,9 +219,7 @@ void BPF_STRUCT_OPS(
     dctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
 }
 
-void BPF_STRUCT_OPS(
-  lunar_exit,
-  struct scx_exit_info* ei)
+void BPF_STRUCT_OPS(lunar_exit, struct scx_exit_info* ei)
 {
   UEI_RECORD(uei, ei);
 }
@@ -244,8 +247,12 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   u64 now = bpf_ktime_get_ns();
   context->started_at = now;
 
-  // bpf_printk("lunar_run cpu=%d pid=%d tgid=%d comm=%s dsqType=%llu greedy=%d dsq_id=%llu slice=%llu duty=%llu", bpf_get_smp_processor_id(), p->pid, p->tgid, p->comm,
-  //            context->current_dsq_type, context->counted_in_greedy_group, context->counted_greedy_dsq, context->last_run_granted_slice, context->duty);
+  dispatch_ctx->current_task_run_started = now;
+  dispatch_ctx->current_task_is_override = dispatch_ctx->pending_override;
+  dispatch_ctx->pending_override = false;
+
+  // bpf_printk("lunar_run cpu=%d pid=%d tgid=%d comm=%s dsqType=%llu duty=%lld", bpf_get_smp_processor_id(), p->pid, p->tgid, p->comm,
+  //            context->current_dsq_type, context->duty);
 }
 
 void BPF_STRUCT_OPS(lunar_quiescent, struct task_struct* p, u64 deq_flags)

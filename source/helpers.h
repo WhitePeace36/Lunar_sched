@@ -42,6 +42,22 @@ static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
   return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
 }
 
+static __always_inline void stamp_tier_head_ts(struct dispatch_ctx* dctx, u64 dsqType, u64 now)
+{
+  switch (dsqType)
+  {
+    case DSQ_TYPE_INTERACTIVE:
+      dctx->tier_head_ts[DSQ_TYPE_INTERACTIVE] = now;
+      return;
+    case DSQ_TYPE_NORMAL:
+      dctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
+      return;
+    case DSQ_TYPE_GREEDY:
+      dctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
+      return;
+  }
+}
+
 static __always_inline bool is_kthread(const struct task_struct* p)
 {
   return p->flags & PF_KTHREAD;

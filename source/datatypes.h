@@ -31,6 +31,12 @@ struct dispatch_ctx
 {
   u64 current_task_dsq_type;
   u64 last_kick_timestamp;
+  // stuff for starvation
+  u64 tier_head_ts[DSQ_TYPE_GREEDY + 1];
+  u64 last_override_ts;
+  bool pending_override;
+  bool current_task_is_override;
+  u64 current_task_run_started;
 };
 
 struct
