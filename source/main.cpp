@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <string_view>
 
 typedef uint64_t u64;
 typedef int64_t s64;
@@ -28,15 +29,12 @@ using namespace std;
 
 std::atomic<bool> stop{};
 
-static void sig_handler(
-  int)
+static void sig_handler(int)
 {
   stop = true;
 }
 
-int main(
-  int argc,
-  const char** argv)
+int main(int argc, const char** argv)
 {
   signal(SIGINT, sig_handler);
   signal(SIGTERM, sig_handler);

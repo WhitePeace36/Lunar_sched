@@ -25,6 +25,13 @@ struct task_ctx
   u64 started_at;
   u64 duty_samples;
   u64 last_run_granted_slice;
+
+  u64 wait_interval;
+  u64 wake_interval;
+  u64 last_woken_at;
+  u64 last_wake_at;
+  u32 crit;
+  bool isFork;
 };
 
 struct dispatch_ctx
@@ -34,8 +41,6 @@ struct dispatch_ctx
   // stuff for starvation
   u64 tier_head_ts[DSQ_TYPE_GREEDY + 1];
   u64 last_override_ts;
-  bool pending_override;
-  bool current_task_is_override;
   u64 current_task_run_started;
 };
 
