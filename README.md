@@ -82,7 +82,7 @@ It has 5 tiers. Which are:
 All new tasks get thrown into greedy. And start with duty of 1023.
 There is also a min. sample rate of the duty value to be eligible for promotion into higher tiers. 
 
-Each tier also has a slice time of 500us.
+Each tier also has a slice time of up to uninterrupted 8ms.
 
 When a lower tier task is running at the moment a higher tier gets enqueued then the current task gets kicked and preempted.
 

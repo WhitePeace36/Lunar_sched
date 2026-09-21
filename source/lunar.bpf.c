@@ -65,6 +65,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
   s32 ret;
 
   u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
   u32 cpu;
   bpf_for(cpu, 0, nr_cpu_ids)
   {
@@ -180,9 +181,10 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 
   if (enq_flags & SCX_ENQ_WAKEUP && dispatch_ctx->current_task_dsq_type > dsqType)
   {
-    bool is_protected = /*dispatch_ctx->current_task_is_override &&*/ (now - dispatch_ctx->current_task_run_started) < MIN_RUN_BEFORE_PREEMPT;
+    // bool is_protected = dispatch_ctx->current_task_dsq_type == DSQ_TYPE_GREEDY &&
+    //                     /*dsqType == DSQ_TYPE_LC &&*/ (now - dispatch_ctx->current_task_run_started) < MIN_RUN_BEFORE_PREEMPT;
 
-    if (!is_protected)
+    if (dispatch_ctx->current_task_dsq_type == DSQ_TYPE_GREEDY)
     {
       dispatch_ctx->last_kick_timestamp = now;
       scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
