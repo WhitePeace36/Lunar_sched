@@ -25,6 +25,14 @@ struct task_ctx
   u64 started_at;
   u64 duty_samples;
   u64 last_run_granted_slice;
+
+  u64 wait_ivl;   // EWMA interval between being woken
+  u64 wake_ivl;   // EWMA interval between waking another task
+  u64 last_woken_at;
+  u64 last_wake_at;
+  u32 crit;          // last computed score, 0..CRIT_MAX
+  u32 tier_changes;  // how often the tier moved; flapping shows up here
+  bool isFork;
 };
 
 struct dispatch_ctx

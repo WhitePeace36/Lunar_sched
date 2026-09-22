@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <string_view>
 
 typedef uint64_t u64;
 typedef int64_t s64;
@@ -28,15 +29,12 @@ using namespace std;
 
 std::atomic<bool> stop{};
 
-static void sig_handler(
-  int)
+static void sig_handler(int)
 {
   stop = true;
 }
 
-int main(
-  int argc,
-  const char** argv)
+int main(int argc, const char** argv)
 {
   signal(SIGINT, sig_handler);
   signal(SIGTERM, sig_handler);
@@ -56,6 +54,15 @@ int main(
   skel->struct_ops.lunar_ops->hotplug_seq = scx_hotplug_seq();
 
   UEI_SET_SIZE(skel, lunar_ops, uei);
+
+  for (int i = 1; i < argc; ++i)
+  {
+    if (std::string_view(argv[i]) == "--log-tiers")
+    {
+      skel->rodata->log_tier_changes = true;
+      std::cout << "Logging tier changes to /sys/kernel/tracing/trace_pipe" << std::endl;
+    }
+  }
 
   if (!setup_lunar_topology(skel))
   {
