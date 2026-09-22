@@ -224,10 +224,10 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 
   scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 
-  if ((enq_flags & SCX_ENQ_WAKEUP) && dsqType != DSQ_TYPE_GREEDY && dispatch_ctx->current_task_dsq_type > dsqType)
+  if ((enq_flags & SCX_ENQ_WAKEUP) && dispatch_ctx->current_task_dsq_type != DSQ_TYPE_LC && dsqType == DSQ_TYPE_LC)
   {
-      dispatch_ctx->last_kick_timestamp = now;
-      scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+    dispatch_ctx->last_kick_timestamp = now;
+    scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
   }
 }
 
