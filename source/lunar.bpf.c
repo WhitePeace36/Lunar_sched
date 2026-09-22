@@ -17,15 +17,6 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-// Set from userspace (lunar --log-tiers). Prints one line per tier change to
-// /sys/kernel/tracing/trace_pipe, which is what you tune the CRIT_EDGE_* from.
-const volatile bool log_tier_changes = false;
-
-static __always_inline u64 dispatch_with_fallback(u32 cpu)
-{
-  return dispatch_dsq_per_cpu(cpu);
-}
-
 // Tier numbers double as priorities: a smaller number is more important.
 
 // What the task's behaviour asks for.
@@ -202,7 +193,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
         tctx->wait_ivl = pctx->wait_ivl;
         tctx->wake_ivl = pctx->wake_ivl;
         tctx->current_dsq_type = pctx->current_dsq_type < DSQ_TYPE_NORMAL ? DSQ_TYPE_NORMAL : pctx->current_dsq_type;
-        tctx->duty_samples = DUTY_SAMPLES_NEEDED / 2;
+        tctx->duty_samples = DUTY_SAMPLES_NEEDED;
         tctx->isFork = true;
       }
     }
@@ -239,10 +230,6 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 
   u64 now = bpf_ktime_get_ns();
 
-  // A tier only needs an arrival timestamp for starvation tracking once it
-  // goes empty -> non-empty; while it stays continuously non-empty, the
-  // original timestamp is exactly the signal we want ("how long has this
-  // tier been crowded out without a gap").
   if (dsqType != DSQ_TYPE_LC && scx_bpf_dsq_nr_queued(dsq) == 0)
   {
     stamp_tier_head_ts(dispatch_ctx, dsqType, now);
@@ -250,22 +237,16 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 
   scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 
-  if ((enq_flags & SCX_ENQ_WAKEUP) && dsqType != DSQ_TYPE_GREEDY)
+  if ((enq_flags & SCX_ENQ_WAKEUP) && dsqType != DSQ_TYPE_GREEDY && dispatch_ctx->current_task_dsq_type > dsqType)
   {
-    // bool is_protected = dispatch_ctx->current_task_dsq_type == DSQ_TYPE_GREEDY &&
-    //                     /*dsqType == DSQ_TYPE_LC &&*/ (now - dispatch_ctx->current_task_run_started) < MIN_RUN_BEFORE_PREEMPT;
-
-    if (dispatch_ctx->current_task_dsq_type /*== DSQ_TYPE_GREEDY*/ > dsqType /*== DSQ_TYPE_LC*/)
-    {
       dispatch_ctx->last_kick_timestamp = now;
       scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-    }
   }
 }
 
 void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
 {
-  dispatch_with_fallback(cpu);
+  dispatch_dsq_per_cpu(cpu);
 }
 
 void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
