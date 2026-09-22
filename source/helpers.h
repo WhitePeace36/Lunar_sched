@@ -114,7 +114,7 @@ static __always_inline u64 getTickInterval_ns(void)
 // Latency criticality
 // ---------------------------------------------------------------------------
 
-static __always_inline u64 ewma(u64 old, u64 sample)
+static __always_inline u64 exponentially_weighted_moving_avg(u64 old, u64 sample)
 {
   return old - (old >> 2) + (sample >> 2);
 }
@@ -129,24 +129,25 @@ static __always_inline u64 elapsed(u64 now, u64 last)
   return now > last ? now - last : 0;
 }
 
-static __always_inline u64 clamp_ivl(u64 ivl)
+static __always_inline u64 clamp_interval(u64 interval)
 {
-  if (ivl < CRIT_IVL_MIN)
-    return CRIT_IVL_MIN;
-  if (ivl > CRIT_IVL_REF)
-    return CRIT_IVL_REF;
-  return ivl;
+  if (interval < CRIT_INTERVAL_MIN)
+    return CRIT_INTERVAL_MIN;
+  if (interval > CRIT_INTERVAL_REF)
+    return CRIT_INTERVAL_REF;
+  return interval;
 }
 
-static __always_inline u64 effective_ivl(u64 avg, u64 last, u64 now)
+static __always_inline u64 effective_interval(u64 avg, u64 last, u64 now)
 {
   u64 since = elapsed(now, last);
-  return clamp_ivl(since > avg ? since : avg);
+  return clamp_interval(since > avg ? since : avg);
 }
 
 static __always_inline u32 calc_crit(struct task_ctx* tctx, u64 now)
 {
-  u32 crit = ilog2(CRIT_IVL_REF / effective_ivl(tctx->wait_ivl, tctx->last_woken_at, now)) + ilog2(CRIT_IVL_REF / effective_ivl(tctx->wake_ivl, tctx->last_wake_at, now));
+  u32 crit = ilog2(CRIT_INTERVAL_REF / effective_interval(tctx->wait_interval, tctx->last_woken_at, now)) +
+             ilog2(CRIT_INTERVAL_REF / effective_interval(tctx->wake_interval, tctx->last_wake_at, now));
 
   return crit > CRIT_MAX ? CRIT_MAX : crit;
 }

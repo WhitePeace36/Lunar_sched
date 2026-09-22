@@ -46,7 +46,7 @@ static __always_inline u64 most_starved_tier(
     return DSQ_TYPE_EMPTY;
 
   u64 worst_type = DSQ_TYPE_EMPTY;
-  s64 worst_overrun = 0;  // only tiers that actually overran (> 0) qualify
+  s64 worst_overrun = 0;
   u64 dsq;
   s64 overrun;
 
@@ -114,9 +114,9 @@ static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
     if (starved != DSQ_TYPE_EMPTY)
     {
       u64 dsq = get_cpu_dsq_from_type(starved, cpu);
-      if (scx_bpf_dsq_move_to_local(dsq, 0))
+      dctx->tier_head_ts[starved] = now;
+      if (scx_bpf_dsq_nr_queued(dsq) && scx_bpf_dsq_move_to_local(dsq, 0))
       {
-        dctx->tier_head_ts[starved] = now;
         dctx->last_override_ts = now;
         dctx->pending_override = true;
         return starved;

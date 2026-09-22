@@ -6,7 +6,7 @@
 // GNU General Public License version 2.
 
 #include <include/scx/common.bpf.h>
-#include <include/bpf_experimental.h>  // bpf_in_interrupt()
+#include <include/bpf_experimental.h>
 #include <bpf/bpf_helpers.h>
 #include "defines.h"
 #include "helpers.h"
@@ -17,9 +17,6 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-// Tier numbers double as priorities: a smaller number is more important.
-
-// What the task's behaviour asks for.
 static __always_inline u64 tier_from_crit(s64 crit)
 {
   if (crit >= CRIT_EDGE_LC)
@@ -31,7 +28,6 @@ static __always_inline u64 tier_from_crit(s64 crit)
   return DSQ_TYPE_GREEDY;
 }
 
-// The most important tier a task with this much cpu use is allowed into.
 static __always_inline u64 tier_cap_from_duty(s64 duty)
 {
   if (duty < DUTY_CAP_LC)
@@ -43,8 +39,6 @@ static __always_inline u64 tier_cap_from_duty(s64 duty)
   return DSQ_TYPE_GREEDY;
 }
 
-// Criticality proposes, duty caps. The larger number wins because it is the
-// less important tier.
 static __always_inline u64 target_tier(s64 crit, s64 duty)
 {
   u64 wanted = tier_from_crit(crit);
@@ -75,14 +69,8 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
   }
 }
 
-// A wakeup came in for @p. If a task caused it, that task is a producer.
 static __always_inline void record_waker(struct task_struct* p, u64 now)
 {
-  // In interrupt context "current" is whatever task the interrupt landed on,
-  // not the cause of the wakeup. GPU and input interrupts would otherwise
-  // credit random hogs as producers. Queued cross-cpu wakeups are also
-  // processed from an interrupt and get skipped too; that is fine, this is a
-  // sampled signal and does not need every event.
   if (bpf_in_interrupt())
     return;
 
@@ -92,9 +80,9 @@ static __always_inline void record_waker(struct task_struct* p, u64 now)
 
   struct task_ctx* wctx = get_task_ctx(waker);
   if (!wctx)
-    return;  // RT task or not managed by us
+    return;
 
-  wctx->wake_ivl = ewma(wctx->wake_ivl, clamp_ivl(elapsed(now, wctx->last_wake_at)));
+  wctx->wake_interval = exponentially_weighted_moving_avg(wctx->wake_interval, clamp_interval(elapsed(now, wctx->last_wake_at)));
   wctx->last_wake_at = now;
 }
 
@@ -164,40 +152,39 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   tctx->current_dsq_type = DSQ_TYPE_GREEDY;
   tctx->started_at = now;
   tctx->run_acc = DUTY_INIT_RUN_NS;
-  tctx->sleep_acc = 0;
+  tctx->sleep_acc = DUTY_INIT_RUN_NS;
   tctx->duty_samples = 0;
-  // No history yet: assume long bursts and rare events, i.e. crit 0.
-  tctx->wait_ivl = CRIT_IVL_REF;
-  tctx->wake_ivl = CRIT_IVL_REF;
+
+  tctx->wait_interval = CRIT_INTERVAL_REF;
+  tctx->wake_interval = CRIT_INTERVAL_REF;
   tctx->last_woken_at = now;
   tctx->last_wake_at = now;
   tctx->crit = 0;
-  tctx->tier_changes = 0;
-  tctx->duty = DUTY_RANGE - 1;
+  tctx->duty = DUTY_RANGE / 2;
 
-  if (args->fork)
-  {
-    struct task_struct* cur = bpf_get_current_task_btf();
-    struct task_struct* parent = p->real_parent;
+  // if (args->fork)
+  // {
+  //   struct task_struct* cur = bpf_get_current_task_btf();
+  //   struct task_struct* parent = p->real_parent;
 
-    bool is_thread = cur && cur->tgid == p->tgid;
+  //   bool is_thread = cur && cur->tgid == p->tgid;
 
-    if (is_thread)
-    {
-      struct task_ctx* pctx = bpf_task_storage_get(&task_ctx_store, cur, NULL, 0);
-      if (pctx && pctx->duty_samples >= DUTY_SAMPLES_NEEDED)
-      {
-        tctx->run_acc = pctx->run_acc >> 1;
-        tctx->sleep_acc = pctx->sleep_acc >> 1;
-        tctx->duty = task_duty(tctx);
-        tctx->wait_ivl = pctx->wait_ivl;
-        tctx->wake_ivl = pctx->wake_ivl;
-        tctx->current_dsq_type = pctx->current_dsq_type < DSQ_TYPE_NORMAL ? DSQ_TYPE_NORMAL : pctx->current_dsq_type;
-        tctx->duty_samples = DUTY_SAMPLES_NEEDED;
-        tctx->isFork = true;
-      }
-    }
-  }
+  //   if (is_thread)
+  //   {
+  //     struct task_ctx* pctx = bpf_task_storage_get(&task_ctx_store, cur, NULL, 0);
+  //     if (pctx && pctx->duty_samples >= DUTY_SAMPLES_NEEDED)
+  //     {
+  //       tctx->run_acc = pctx->run_acc >> 1;
+  //       tctx->sleep_acc = pctx->sleep_acc >> 1;
+  //       tctx->duty = task_duty(tctx);
+  //       tctx->wait_ivl = pctx->wait_ivl;
+  //       tctx->wake_ivl = pctx->wake_ivl;
+  //       tctx->current_dsq_type = pctx->current_dsq_type < DSQ_TYPE_NORMAL ? DSQ_TYPE_NORMAL : pctx->current_dsq_type;
+  //       tctx->duty_samples = DUTY_SAMPLES_NEEDED;
+  //       tctx->isFork = true;
+  //     }
+  //   }
+  // }
   return 0;
 }
 
@@ -328,7 +315,7 @@ void BPF_STRUCT_OPS(lunar_runnable, struct task_struct* p, u64 enq_flags)
 
   if (enq_flags & SCX_ENQ_WAKEUP)
   {
-    tctx->wait_ivl = ewma(tctx->wait_ivl, clamp_ivl(elapsed(now, tctx->last_woken_at)));
+    tctx->wait_interval = exponentially_weighted_moving_avg(tctx->wait_interval, clamp_interval(elapsed(now, tctx->last_woken_at)));
     tctx->last_woken_at = now;
     record_waker(p, now);
   }
