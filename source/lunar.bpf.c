@@ -152,7 +152,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   tctx->current_dsq_type = DSQ_TYPE_GREEDY;
   tctx->started_at = now;
   tctx->run_acc = DUTY_INIT_RUN_NS;
-  tctx->sleep_acc = DUTY_INIT_RUN_NS;
+  tctx->sleep_acc = 0;
   tctx->duty_samples = 0;
 
   tctx->wait_interval = CRIT_INTERVAL_REF;
