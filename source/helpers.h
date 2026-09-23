@@ -17,11 +17,17 @@ static __always_inline struct task_ctx* get_task_ctx(struct task_struct* task)
 
 static __always_inline u64 cpu_dsq(u32 cpu)
 {
-  return DSQ_CPU_BASE + cpu ;
+  if (cpu >= MAX_CPUS)
+    return DSQ_CPU_BASE + MAX_CPUS;
+
+  return DSQ_CPU_BASE + cpu;
 }
 
 static __always_inline u32 cpu_llc(u32 cpu)
 {
+  if (cpu >= MAX_CPUS)
+    return cpu_to_llc[MAX_CPUS];
+
   return cpu_to_llc[cpu];
 }
 

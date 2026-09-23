@@ -59,17 +59,17 @@ static __always_inline void maybe_preempt(u32 cpu, u64 vt, u64 now)
   if (!dctx)
     return;
 
-  if (dctx->running_vtime == VTIME_NONE)
-  {
-    // Idle: ring the bell so it picks the task up now.
-    scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-    return;
-  }
+  // if (dctx->running_vtime == VTIME_NONE)
+  // {
+  //   // Idle: ring the bell so it picks the task up now.
+  //   scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+  //   return;
+  // }
 
   bool clearly_ahead = time_before(vt + PREEMPT_MARGIN, dctx->running_vtime);
-  bool ran_enough = elapsed(now, dctx->run_started) >= MIN_RUN_BEFORE_PREEMPT;
+  // bool ran_enough = elapsed(now, dctx->run_started) >= MIN_RUN_BEFORE_PREEMPT;
 
-  if (clearly_ahead && ran_enough)
+  if (clearly_ahead /*&& ran_enough*/)
     scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 }
 
@@ -85,8 +85,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
     nr = MAX_CPUS;
 
   u32 key = 0;
-
-  for (u32 cpu = 0; cpu < nr && cpu < MAX_CPUS; cpu++)
+  u32 cpu = 0;
+  bpf_for(cpu, 0, nr)
   {
     s32 err = scx_bpf_create_dsq(DSQ_CPU_BASE + cpu, -1);
     if (err)
@@ -106,7 +106,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
   vtime_debt_max = slice_default * VTIME_DEBT_FACTOR;
   vtime_credit_max = slice_default * VTIME_CREDIT_FACTOR;
 
-  bpf_printk("lunar: slice=%lluus debt=%lluus credit=%lluus", slice_dfl / NS_PER_US, vtime_debt_max / NS_PER_US, vtime_credit_max / NS_PER_US);
+  bpf_printk("lunar: slice=%lluus debt=%lluus credit=%lluus", slice_default / NS_PER_US, vtime_debt_max / NS_PER_US, vtime_credit_max / NS_PER_US);
 
   return 0;
 }
