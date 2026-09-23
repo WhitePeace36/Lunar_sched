@@ -88,15 +88,15 @@ static __always_inline u64 calc_place_vtime(struct task_ctx* tctx, u64 enq_flags
 
   if (enq_flags & SCX_ENQ_WAKEUP)
   {
-    u64 credit = (u64)tctx->crit * VTIME_CREDIT_MAX / CRIT_MAX;
+    u64 credit = (u64)tctx->crit * vtime_credit_max / CRIT_MAX;
     u64 floor = clock > credit ? clock - credit : 0;
 
     if (time_before(vt, floor))
       vt = floor;
   }
 
-  if (time_before(clock + SLICE_DEFAULT, vt))
-    vt = clock + SLICE_DEFAULT;
+  if (time_before(clock + vtime_debt_max, vt))
+    vt = clock + vtime_debt_max;
 
   return vt;
 }

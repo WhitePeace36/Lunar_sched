@@ -99,6 +99,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
       dctx->running_vtime = VTIME_NONE;
   }
 
+  u32 cpus = nr_online_cpus > 8 ? 8 : nr_online_cpus;
+  u32 factor = 1 + ilog2(cpus);          // 1 + floor(log2(min(cpus, 8)))
+
+  slice_default = SLICE_BASE * factor;
+  vtime_debt_max = slice_default * VTIME_DEBT_FACTOR;
+  vtime_credit_max = slice_default * VTIME_CREDIT_FACTOR;
+
+  bpf_printk("lunar: slice=%lluus debt=%lluus credit=%lluus", slice_dfl / NS_PER_US, vtime_debt_max / NS_PER_US, vtime_credit_max / NS_PER_US);
+
   return 0;
 }
 
@@ -133,7 +142,7 @@ s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wa
   // An idle cpu was found, so there is nothing to order against: skip the
   // queue entirely. This is the majority of wakeups on a desktop.
   if (is_idle)
-    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SLICE_DEFAULT, 0);
+    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_default, 0);
 
   return cpu;
 }
@@ -157,7 +166,7 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
     vt = vtime_now;
   }
 
-  scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu), SLICE_DEFAULT, vt, enq_flags);
+  scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu), slice_default, vt, enq_flags);
 
   if (enq_flags & SCX_ENQ_WAKEUP)
     maybe_preempt(cpu, vt, now);

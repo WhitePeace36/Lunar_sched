@@ -18,7 +18,10 @@ const volatile u32 llc_nr_cpus[MAX_LLCS] = {};
 
 u64 vtime_now;
 
-const volatile bool log_runs = false;
+u64 slice_default;
+u64 vtime_debt_max;
+u64 vtime_credit_max;
+
 
 struct task_ctx
 {
