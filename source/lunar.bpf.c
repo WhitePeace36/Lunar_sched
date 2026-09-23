@@ -102,9 +102,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
   u32 cpus = nr_online_cpus > 8 ? 8 : nr_online_cpus;
   u32 factor = 1 + ilog2(cpus);          // 1 + floor(log2(min(cpus, 8)))
 
-  slice_default = SLICE_BASE * factor;
-  vtime_debt_max = slice_default * VTIME_DEBT_FACTOR;
-  vtime_credit_max = slice_default * VTIME_CREDIT_FACTOR;
+  slice_default = SLICE_BASE;
+  vtime_debt_max = VTIME_DEBT_MAX;
+  vtime_credit_max = VTIME_CREDIT_MAX;
 
   bpf_printk("lunar: slice=%lluus debt=%lluus credit=%lluus", slice_default / NS_PER_US, vtime_debt_max / NS_PER_US, vtime_credit_max / NS_PER_US);
 
@@ -168,8 +168,8 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 
   scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu), slice_default, vt, enq_flags);
 
-  if (enq_flags & SCX_ENQ_WAKEUP)
-    maybe_preempt(cpu, vt, now);
+  // if (enq_flags & SCX_ENQ_WAKEUP)
+  //   maybe_preempt(cpu, vt, now);
 }
 
 void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
@@ -194,8 +194,8 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
 
   // Move the clock forward to the task now being served. Racy across cpus by
   // design: it is a reference point, and the clamps bound the error.
-  if (time_before(vtime_now, tctx->vtime))
-    vtime_now = tctx->vtime;
+  // if (time_before(vtime_now, tctx->vtime))
+  //   vtime_now += tctx->vtime;
 
   if (dctx)
   {
@@ -209,8 +209,8 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
 
 void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* p, bool runnable)
 {
-  struct task_ctx* tctx = get_task_ctx(p);
   u64 now = bpf_ktime_get_ns();
+  struct task_ctx* tctx = get_task_ctx(p);
   u32 key = 0;
   struct dispatch_ctx* dctx = bpf_map_lookup_elem(&dispatch_state, &key);
 
@@ -224,6 +224,7 @@ void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* p, bool runnable)
 
   // The charge is the whole ordering rule: cpu time used moves a task back.
   tctx->vtime += used_ns;
+  vtime_now = tctx->vtime;
   tctx->crit = calc_crit(tctx, now);
 }
 

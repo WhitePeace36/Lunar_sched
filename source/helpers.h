@@ -65,7 +65,7 @@ static __always_inline u64 clamp_interval(u64 interval)
 static __always_inline u64 effective_interval(u64 avg, u64 last, u64 now)
 {
   u64 since = elapsed(now, last);
-  return clamp_interval(since > avg * 4 ? since : avg);
+  return clamp_interval(since > avg ? since : avg);
 }
 
 static __always_inline u32 calc_crit(struct task_ctx* tctx, u64 now)
@@ -92,15 +92,19 @@ static __always_inline u64 calc_place_vtime(struct task_ctx* tctx, u64 enq_flags
   u64 vt = tctx->vtime;
   u64 clock = vtime_now;
 
-  if (enq_flags & SCX_ENQ_WAKEUP)
-  {
-    u64 credit = (u64)tctx->crit * vtime_credit_max / CRIT_MAX;
-    u64 floor = clock > credit ? clock - credit : 0;
+  // if (enq_flags & SCX_ENQ_WAKEUP)
+  // {
+  //   u64 credit = (u64)tctx->crit * vtime_credit_max / CRIT_MAX;
+  //   u64 floor = clock > credit ? clock - credit : 0;
 
-    if (time_before(vt, floor))
-      vt = floor;
-  }
+  //   if (time_before(vt, floor))
+  //     vt = floor;
+  // }
+  if (time_before(vt, clock - vtime_credit_max))
+    vt = clock - vtime_credit_max;
 
+  // And cap how far running may push it back, which is the service interval
+  // for a hog when light work is queued.
   if (time_before(clock + vtime_debt_max, vt))
     vt = clock + vtime_debt_max;
 
