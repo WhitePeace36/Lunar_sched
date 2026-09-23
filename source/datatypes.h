@@ -10,40 +10,33 @@
 #include "defines.h"
 
 const volatile u32 nr_llcs = 1;
+const volatile u32 nr_online_cpus = 1;
 const volatile u32 cpu_to_llc[MAX_CPUS] = {};
 
-extern const int CONFIG_HZ __kconfig;
+const volatile u32 llc_cpus[MAX_LLCS][MAX_CPUS_PER_LLC] = {};
+const volatile u32 llc_nr_cpus[MAX_LLCS] = {};
+
+u64 vtime_now;
+
+const volatile bool log_runs = false;
 
 struct task_ctx
 {
-  u64 current_dsq_type;
-  u64 blocked_at;
-  u64 runnable_at;
-  s64 duty;
-  u64 run_acc;
-  u64 sleep_acc;
-  u64 started_at;
-  u64 duty_samples;
-  u64 last_run_granted_slice;
+  u64 vtime;         // accumulated cpu time, the queue key
+  u64 started_at;    // when the current on cpu stretch began
 
-  u64 wait_interval;
-  u64 wake_interval;
+  // latency criticality inputs
+  u64 wait_interval;  // EWMA interval between being woken
+  u64 wake_interval;  // EWMA interval between waking another task
   u64 last_woken_at;
   u64 last_wake_at;
   u32 crit;
-  bool isFork;
 };
 
 struct dispatch_ctx
 {
-  u64 current_task_dsq_type;
-  u64 last_kick_timestamp;
-  // stuff for starvation
-  u64 tier_head_ts[DSQ_TYPE_GREEDY + 1];
-  u64 last_override_ts;
-  bool pending_override;
-  bool current_task_is_override;
-  u64 current_task_run_started;
+  u64 running_vtime;  // VTIME_NONE when no tracked task is on this cpu
+  u64 run_started;
 };
 
 struct

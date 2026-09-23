@@ -237,12 +237,46 @@ bool setup_lunar_topology(Skel* skel, const std::filesystem::path& cpu_root = "/
     skel->rodata->cpu_to_llc[cpu] = topo->cpu_to_llc[cpu];
   }
 
+  // Reverse map, so the BPF side can walk the cpus of one llc directly
+  // instead of scanning every cpu in the system.
+  const auto max_llcs = static_cast<std::uint32_t>(std::size(skel->rodata->llc_nr_cpus));
+  const auto max_cpus_per_llc = static_cast<std::uint32_t>(std::size(skel->rodata->llc_cpus[0]));
+
+  if (topo->nr_llcs > max_llcs)
+  {
+    std::cerr << "lunar: " << topo->nr_llcs << " llc domains, but MAX_LLCS is " << max_llcs << "; bump it in defines.h\n";
+    return false;
+  }
+
+  for (std::uint32_t llc = 0; llc < max_llcs; ++llc)
+    skel->rodata->llc_nr_cpus[llc] = 0;
+
+  for (std::uint32_t cpu = 0; cpu < topo->nr_cpu_ids; ++cpu)
+  {
+    if (!topo->cpu_online[cpu])
+      continue;
+
+    const auto llc = topo->cpu_to_llc[cpu];
+    const auto slot = skel->rodata->llc_nr_cpus[llc];
+
+    if (slot >= max_cpus_per_llc)
+    {
+      std::cerr << "lunar: llc" << llc << " has more than " << max_cpus_per_llc << " cpus; bump MAX_CPUS_PER_LLC in defines.h\n";
+      return false;
+    }
+
+    skel->rodata->llc_cpus[llc][slot] = cpu;
+    skel->rodata->llc_nr_cpus[llc] = slot + 1;
+  }
+
   std::uint32_t nr_online = 0;
   for (std::uint32_t cpu = 0; cpu < topo->nr_cpu_ids; ++cpu)
   {
     if (topo->cpu_online[cpu])
       ++nr_online;
   }
+
+  skel->rodata->nr_online_cpus = nr_online ? nr_online : 1;
 
   std::cerr << "lunar: topology: " << topo->nr_cpu_ids << " cpu ids (" << nr_online << " online), " << topo->nr_llcs << " llc domain(s)\n";
   for (std::uint32_t cpu = 0; cpu < topo->nr_cpu_ids; ++cpu)

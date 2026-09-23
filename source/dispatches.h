@@ -7,181 +7,62 @@
 
 #ifndef DISPATCHES_H
 #define DISPATCHES_H
-
-#include "defines.h"
 #include "datatypes.h"
+#include "defines.h"
 #include "helpers.h"
 
-static __always_inline u64 try_acquire_task_from_other_cpu(u64 dsqType, u32 cpu, bool sameLLC)
+// Each cpu queue is vtime ordered, so move_to_local() always takes the task
+// with the lowest vtime. There is nothing to scan and no score to recompute
+// at steal time: the queue already answers "which task".
+static __always_inline bool steal_from_llc(u32 llc, u32 self, u32 start)
 {
-  u32 my_llc = cpu_llc_id(cpu);
-  u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
-  u32 start = bpf_get_prandom_u32() % nr_cpu_ids;
-  u32 i;
+  llc &= (MAX_LLCS - 1);
 
-  bpf_for(i, 0, nr_cpu_ids)
+  u32 n = llc_nr_cpus[llc];
+  if (n > MAX_CPUS_PER_LLC)
+    n = MAX_CPUS_PER_LLC;
+
+  for (u32 i = 0; i < n && i < MAX_CPUS_PER_LLC; i++)
   {
-    u32 other = (start + i) % nr_cpu_ids;
-    if (other == cpu)
+    // Rotate within the filled entries only: slots past llc_nr_cpus are
+    // zero, and would send every cpu stealing from cpu0.
+    u32 victim = llc_cpus[llc][((start + i) % n) & (MAX_CPUS_PER_LLC - 1)];
+
+    if (victim == self || victim >= MAX_CPUS)
       continue;
-    if (sameLLC && cpu_llc_id(other) != my_llc)
-      continue;
-    if (!sameLLC && cpu_llc_id(other) == my_llc)
-      continue;
 
-    u64 dsq = get_cpu_dsq_from_type(dsqType, other);
-
-    if (scx_bpf_dsq_nr_queued(dsq) && scx_bpf_dsq_move_to_local(dsq, 0))
-      return dsqType;
+    // Do not stop on failure. move_to_local() only considers the head, and it
+    // fails when that task cannot run here (affinity, migration disabled).
+    // Giving up would let one pinned task block the whole steal.
+    if (scx_bpf_dsq_move_to_local(cpu_dsq(victim), 0))
+      return true;
   }
-  return DSQ_TYPE_EMPTY;
+
+  return false;
 }
 
-static __always_inline u64 most_starved_tier(
-  struct dispatch_ctx* dctx,
-  u32 cpu,
-  u64 now)
+static __always_inline bool steal_work(u32 self)
 {
-  if (now - dctx->last_override_ts < STARVE_OVERRIDE_COOLDOWN_NS)
-    return DSQ_TYPE_EMPTY;
+  u32 home = cpu_llc(self);
+  u32 start = bpf_get_prandom_u32() & (MAX_CPUS_PER_LLC - 1);
+  u32 nllc = nr_llcs;
 
-  u64 worst_type = DSQ_TYPE_EMPTY;
-  s64 worst_overrun = 0;
-  u64 dsq;
-  s64 overrun;
+  if (nllc > MAX_LLCS)
+    nllc = MAX_LLCS;
 
-  dsq = get_cpu_dsq_from_type(DSQ_TYPE_INTERACTIVE, cpu);
-  if (scx_bpf_dsq_nr_queued(dsq))
+  // Same llc first: those tasks are still warm in the shared cache.
+  if (steal_from_llc(home, self, start))
+    return true;
+
+  // Only cross an llc boundary when our own has nothing left, since a remote
+  // task refills from memory rather than from shared cache.
+  for (u32 i = 1; i < nllc && i < MAX_LLCS; i++)
   {
-    overrun = (s64)(now - dctx->tier_head_ts[DSQ_TYPE_INTERACTIVE]) - (s64)STARVE_BUDGET_INTERACTIVE_NS;
-    if (overrun > worst_overrun)
-    {
-      worst_overrun = overrun;
-      worst_type = DSQ_TYPE_INTERACTIVE;
-    }
+    if (steal_from_llc((home + i) % nllc, self, start))
+      return true;
   }
 
-  dsq = get_cpu_dsq_from_type(DSQ_TYPE_NORMAL, cpu);
-  if (scx_bpf_dsq_nr_queued(dsq))
-  {
-    overrun = (s64)(now - dctx->tier_head_ts[DSQ_TYPE_NORMAL]) - (s64)STARVE_BUDGET_NORMAL_NS;
-    if (overrun > worst_overrun)
-    {
-      worst_overrun = overrun;
-      worst_type = DSQ_TYPE_NORMAL;
-    }
-  }
-
-  dsq = get_cpu_dsq_from_type(DSQ_TYPE_GREEDY, cpu);
-  if (scx_bpf_dsq_nr_queued(dsq))
-  {
-    overrun = (s64)(now - dctx->tier_head_ts[DSQ_TYPE_GREEDY]) - (s64)STARVE_BUDGET_GREEDY_NS;
-    if (overrun > worst_overrun)
-    {
-      worst_overrun = overrun;
-      worst_type = DSQ_TYPE_GREEDY;
-    }
-  }
-
-  return worst_type;
-}
-
-static __always_inline bool take_from_local_tier(struct dispatch_ctx* dctx, u64 dsqType, u32 cpu, u64 now)
-{
-  u64 dsq = get_cpu_dsq_from_type(dsqType, cpu);
-  if (dctx)
-    stamp_tier_head_ts(dctx, dsqType, now);
-
-  return scx_bpf_dsq_nr_queued(dsq) && scx_bpf_dsq_move_to_local(dsq, 0);
-}
-
-static __always_inline bool take_from_other_tier(struct dispatch_ctx* dctx, u64 dsqType, u32 cpu, u64 now, bool thisLLC)
-{
-  if (dctx)
-    stamp_tier_head_ts(dctx, dsqType, now);
-
-  return try_acquire_task_from_other_cpu(dsqType, cpu, thisLLC) != DSQ_TYPE_EMPTY;
-}
-
-static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
-{
-  u32 key = 0;
-  struct dispatch_ctx* dctx = bpf_map_lookup_percpu_elem(&dispatch_state, &key, cpu);
-  u64 now = bpf_ktime_get_ns();
-  if (dctx)
-  {
-    u64 starved = most_starved_tier(dctx, cpu, now);
-    if (starved != DSQ_TYPE_EMPTY)
-    {
-      u64 dsq = get_cpu_dsq_from_type(starved, cpu);
-      dctx->tier_head_ts[starved] = now;
-      if (scx_bpf_dsq_nr_queued(dsq) && scx_bpf_dsq_move_to_local(dsq, 0))
-      {
-        dctx->last_override_ts = now;
-        dctx->pending_override = true;
-        return starved;
-      }
-    }
-  }
-
-  if (take_from_local_tier(dctx, DSQ_TYPE_LC, cpu, now))
-  {
-    return DSQ_TYPE_LC;
-  }
-  if (take_from_local_tier(dctx, DSQ_TYPE_INTERACTIVE, cpu, now))
-  {
-    return DSQ_TYPE_INTERACTIVE;
-  }
-  if (take_from_local_tier(dctx, DSQ_TYPE_NORMAL, cpu, now))
-  {
-    return DSQ_TYPE_NORMAL;
-  }
-  if (take_from_local_tier(dctx, DSQ_TYPE_GREEDY, cpu, now))
-  {
-    return DSQ_TYPE_GREEDY;
-  }
-
-  if (take_from_other_tier(dctx, DSQ_TYPE_LC, cpu, now, true))
-  {
-    return DSQ_TYPE_LC;
-  }
-  if (take_from_other_tier(dctx, DSQ_TYPE_INTERACTIVE, cpu, now, true))
-  {
-    return DSQ_TYPE_INTERACTIVE;
-  }
-  if (take_from_other_tier(dctx, DSQ_TYPE_NORMAL, cpu, now, true))
-  {
-    return DSQ_TYPE_NORMAL;
-  }
-  if (take_from_other_tier(dctx, DSQ_TYPE_GREEDY, cpu, now, true))
-  {
-    return DSQ_TYPE_GREEDY;
-  }
-
-  if (nr_llcs > 1)
-  {
-    if (take_from_other_tier(dctx, DSQ_TYPE_LC, cpu, now, false))
-    {
-      return DSQ_TYPE_LC;
-    }
-
-    if (take_from_other_tier(dctx, DSQ_TYPE_INTERACTIVE, cpu, now, false))
-    {
-      return DSQ_TYPE_INTERACTIVE;
-    }
-
-    if (take_from_other_tier(dctx, DSQ_TYPE_NORMAL, cpu, now, false))
-    {
-      return DSQ_TYPE_NORMAL;
-    }
-
-    if (take_from_other_tier(dctx, DSQ_TYPE_GREEDY, cpu, now, false))
-    {
-      return DSQ_TYPE_GREEDY;
-    }
-  }
-
-  return DSQ_TYPE_EMPTY;
+  return false;
 }
 
 #endif  // DISPATCHES_H

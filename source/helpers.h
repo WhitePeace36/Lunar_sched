@@ -10,104 +10,19 @@
 #include "datatypes.h"
 #include "defines.h"
 
-static __always_inline u64 get_dsq_task_slice(u64 dsqType)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return SLICE_LC;
-    case DSQ_TYPE_INTERACTIVE:
-      return SLICE_INTERACTIVE;
-    case DSQ_TYPE_NORMAL:
-      return SLICE_NORMAL;
-    case DSQ_TYPE_GREEDY:
-      return SLICE_GREEDY;
-  }
-  return SLICE_GREEDY;
-}
-
-static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return DSQ_CPU_QUEUE_BASE_LC + cpu;
-    case DSQ_TYPE_INTERACTIVE:
-      return DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu;
-    case DSQ_TYPE_NORMAL:
-      return DSQ_CPU_QUEUE_BASE_NORMAL + cpu;
-    case DSQ_TYPE_GREEDY:
-      return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
-  }
-  return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
-}
-
-static __always_inline void stamp_tier_head_ts(struct dispatch_ctx* dctx, u64 dsqType, u64 now)
-{
-  switch (dsqType)
-  {
-    case DSQ_TYPE_INTERACTIVE:
-      dctx->tier_head_ts[DSQ_TYPE_INTERACTIVE] = now;
-      return;
-    case DSQ_TYPE_NORMAL:
-      dctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
-      return;
-    case DSQ_TYPE_GREEDY:
-      dctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
-      return;
-  }
-}
-
-static __always_inline bool is_kthread(const struct task_struct* p)
-{
-  return p->flags & PF_KTHREAD;
-}
-
-static __always_inline bool is_high_prio_kthread_task(struct task_struct* p)
-{
-  return p->prio == MAX_RT_PRIO && is_kthread(p);
-}
-
 static __always_inline struct task_ctx* get_task_ctx(struct task_struct* task)
 {
   return bpf_task_storage_get(&task_ctx_store, task, NULL, 0);
 }
 
-static __always_inline u32 cpu_llc_id(u32 cpu)
+static __always_inline u64 cpu_dsq(u32 cpu)
 {
-  cpu &= (MAX_CPUS - 1);
+  return DSQ_CPU_BASE + cpu ;
+}
+
+static __always_inline u32 cpu_llc(u32 cpu)
+{
   return cpu_to_llc[cpu];
-}
-
-static __always_inline u32 task_duty(const struct task_ctx* tctx)
-{
-  return (tctx->run_acc << 10) / (tctx->run_acc + tctx->sleep_acc + 1);
-}
-
-static __always_inline void duty_account(struct task_ctx* tctx, u64 run, u64 slept)
-{
-  if (run > DUTY_WINDOW_NS)
-    run = DUTY_WINDOW_NS;
-  if (slept > DUTY_WINDOW_NS)
-    slept = DUTY_WINDOW_NS;
-
-  tctx->run_acc += run;
-
-  if (tctx->run_acc > DUTY_WINDOW_NS)
-    tctx->run_acc = DUTY_WINDOW_NS;
-
-  tctx->sleep_acc += slept;
-
-  if (tctx->run_acc + tctx->sleep_acc > 2 * DUTY_WINDOW_NS)
-  {
-    tctx->run_acc >>= 1;
-    tctx->sleep_acc >>= 1;
-  }
-}
-
-static __always_inline u64 getTickInterval_ns(void)
-{
-  return 1000000000ULL / CONFIG_HZ;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,10 +53,13 @@ static __always_inline u64 clamp_interval(u64 interval)
   return interval;
 }
 
+// A gap far longer than the usual rhythm means the task went idle. A gap only
+// slightly longer is jitter, and folding that into the score makes crit swing
+// by several points depending on when it is sampled.
 static __always_inline u64 effective_interval(u64 avg, u64 last, u64 now)
 {
   u64 since = elapsed(now, last);
-  return clamp_interval(since > avg ? since : avg);
+  return clamp_interval(since > avg * 4 ? since : avg);
 }
 
 static __always_inline u32 calc_crit(struct task_ctx* tctx, u64 now)
@@ -151,5 +69,38 @@ static __always_inline u32 calc_crit(struct task_ctx* tctx, u64 now)
 
   return crit > CRIT_MAX ? CRIT_MAX : crit;
 }
+
+// ---------------------------------------------------------------------------
+// Virtual time placement
+// ---------------------------------------------------------------------------
+
+// Where this task belongs in the queue.
+//
+// The base is its accumulated cpu time, so a task that has had less cpu sorts
+// first. On wakeup, criticality buys a head start of up to VTIME_CREDIT_MAX;
+// that is what gives a frame or audio thread its latency, and the cap is what
+// stops it from shutting anyone out. The upper clamp keeps a task that has
+// been running from falling so far behind that it becomes unreachable.
+static __always_inline u64 calc_place_vtime(struct task_ctx* tctx, u64 enq_flags)
+{
+  u64 vt = tctx->vtime;
+  u64 clock = vtime_now;
+
+  if (enq_flags & SCX_ENQ_WAKEUP)
+  {
+    u64 credit = (u64)tctx->crit * VTIME_CREDIT_MAX / CRIT_MAX;
+    u64 floor = clock > credit ? clock - credit : 0;
+
+    if (time_before(vt, floor))
+      vt = floor;
+  }
+
+  if (time_before(clock + SLICE_DEFAULT, vt))
+    vt = clock + SLICE_DEFAULT;
+
+  return vt;
+}
+
+
 
 #endif  // HELPERS_H

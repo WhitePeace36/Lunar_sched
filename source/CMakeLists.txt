@@ -18,8 +18,8 @@ set(BPF_SKEL
 add_custom_command(
     OUTPUT ${BPF_OBJ}
     COMMAND ${CLANG_EXECUTABLE}
-        -target bpf -g -O2 -Wall -Wno-compare-distinct-pointer-types -mcpu=v3 -D__TARGET_ARCH_${BPF_TARGET_ARCH} -mlittle-endian -idirafter
-        -I${SCX_INCLUDE}
+        -target bpf -g -O2 -Wall -Wno-compare-distinct-pointer-types -mcpu=v3 -D__TARGET_ARCH_${BPF_TARGET_ARCH} -mlittle-endian
+        -I${CMAKE_SOURCE_DIR}/include
         -I${CMAKE_CURRENT_SOURCE_DIR}
         -I${CMAKE_SOURCE_DIR}
         ${LIBBPF_CFLAGS_OTHER}
