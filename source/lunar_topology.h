@@ -15,9 +15,6 @@ namespace lunar
 {
 namespace fs = std::filesystem;
 
-// LLC DSQ id bases are spaced 64 apart on the BPF side.
-inline constexpr std::uint32_t kMaxLlcDomains = 64;
-
 struct Topology
 {
   std::uint32_t nr_cpu_ids = 0;  // highest possible CPU id + 1
@@ -222,15 +219,10 @@ bool setup_lunar_topology(Skel* skel, const std::filesystem::path& cpu_root = "/
     std::cerr << "lunar: topology reported zero LLC domains\n";
     return false;
   }
-  if (topo->nr_llcs > lunar::kMaxLlcDomains)
-  {
-    std::cerr << "lunar: detected " << topo->nr_llcs << " LLC domains, but the DSQ id layout supports at most " << lunar::kMaxLlcDomains << "\n";
-    return false;
-  }
 
   skel->rodata->nr_llcs = topo->nr_llcs;
 
-  std::cout << "Numer of found llcs: " << topo->nr_llcs << std::endl;
+  std::cout << "Number of found llcs: " << topo->nr_llcs << std::endl;
 
   for (std::uint32_t cpu = 0; cpu < topo->nr_cpu_ids; ++cpu)
   {

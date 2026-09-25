@@ -34,20 +34,20 @@ static void sig_handler(int)
   stop = true;
 }
 
-int main(int argc, const char** argv)
+enum class RunResult
 {
-  signal(SIGINT, sig_handler);
-  signal(SIGTERM, sig_handler);
+  Stopped,  // SIGINT/SIGTERM
+  Restart,  // kernel asked for a restart (e.g. CPU hotplug)
+  Failed,
+};
 
-  int err = 0;
-
-  lunar_bpf* skel{nullptr};
-
-  skel = lunar_bpf__open();
+static RunResult run_once()
+{
+  lunar_bpf* skel = lunar_bpf__open();
   if (!skel)
   {
     std::cerr << "Failed to create BPF skeleton." << std::endl;
-    return 1;
+    return RunResult::Failed;
   }
   SCX_ENUM_INIT(skel);
 
@@ -57,17 +57,17 @@ int main(int argc, const char** argv)
 
   if (!setup_lunar_topology(skel))
   {
-    std::cout << "Failed to load llc information: " << err << std::endl;
+    std::cerr << "Failed to load llc information." << std::endl;
     lunar_bpf__destroy(skel);
-    return 1;
+    return RunResult::Failed;
   }
 
-  err = lunar_bpf__load(skel);
+  int err = lunar_bpf__load(skel);
   if (err)
   {
     std::cerr << "Failed to load scheduler: " << err << std::endl;
     lunar_bpf__destroy(skel);
-    return 1;
+    return RunResult::Failed;
   }
 
   std::cerr << "Successfully opened and loaded the lunar scheduler." << std::endl;
@@ -79,7 +79,7 @@ int main(int argc, const char** argv)
   {
     std::cerr << "Failed to attach BPF programs: " << err << std::endl;
     lunar_bpf__destroy(skel);
-    return 1;
+    return RunResult::Failed;
   }
 
   std::cout << "lunar scheduler is successfully running!" << std::endl;
@@ -92,14 +92,34 @@ int main(int argc, const char** argv)
       ejected = true;
       break;
     }
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
+  RunResult result = RunResult::Stopped;
   if (ejected)
-    UEI_REPORT(skel, uei);
+  {
+    u64 ecode = UEI_REPORT(skel, uei);
+    result = UEI_ECODE_RESTART(ecode) ? RunResult::Restart : RunResult::Failed;
+  }
+
+  lunar_bpf__destroy(skel);
+  return result;
+}
+
+int main(int argc, const char** argv)
+{
+  signal(SIGINT, sig_handler);
+  signal(SIGTERM, sig_handler);
+
+  RunResult result;
+  do
+  {
+    result = run_once();
+    if (result == RunResult::Restart && !stop)
+      std::cout << "Kernel requested a restart (e.g. CPU hotplug), restarting..." << std::endl;
+  } while (result == RunResult::Restart && !stop);
 
   std::cout << "Shutting down and restoring default kernel scheduler..." << std::endl;
-  lunar_bpf__destroy(skel);
 
-  return ejected ? 1 : 0;
+  return result == RunResult::Failed ? 1 : 0;
 }
