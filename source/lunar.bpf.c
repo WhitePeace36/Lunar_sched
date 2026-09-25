@@ -24,7 +24,7 @@ static __always_inline u64 tier_from_crit(s64 crit)
   if (crit >= CRIT_EDGE_INTERACTIVE)
     return DSQ_TYPE_INTERACTIVE;
   if (crit >= CRIT_EDGE_NORMAL)
-    return DUTY_CAP_NORMAL;
+    return DSQ_TYPE_NORMAL;
   return DSQ_TYPE_GREEDY;
 }
 

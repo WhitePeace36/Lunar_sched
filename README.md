@@ -81,7 +81,8 @@ It has 3 tiers. Which are:
 
 1. LC with duty <= 5% and crit score of >= 5
 2. INTERACTIVE with duty <= 10% and crit score of >= 3
-3. NORMAL for everything else
+3. NORMAL with duty <= 80% and crit score of >=1
+4. Greedy with everything else
 
 There is no hysteresis on the crit score. There is a hysteresis of 1% on the duty.
 
@@ -108,21 +109,20 @@ Otherwise the task goes to the queue of the core with the least work ahead of it
 - an idle core is always preferred
 - LC and INTERACTIVE tasks check all cores of the same llc, so they don't wait
   behind a task of their own tier while another core runs lower tier work
-- NORMAL tasks compare their core with 2 random cores of the same llc
+- NORMAL and GREEDY tasks compare their core with 2 random cores of the same llc
   and move at most once every 10ms, which evens out long queues between busy cores
 
 ## Dispatch
 
 Each core first runs its own LC tasks, then a starved tier if there is one, then
-its own INTERACTIVE and NORMAL tasks. After that it steals from another
+its own INTERACTIVE, NORMAL and GREEDY tasks. After that it steals from another
 core of the same llc and then from cores of other llcs.
 From which core the core starts stealing is randomized for better load distribution.
 
 ## Starvation
 
-If the head of a tier has not been served for longer than its budget
-(INTERACTIVE 25ms, NORMAL 50ms), it gets one slice ahead of the higher tiers,
-at most once every 10ms per core. The values are in `source/defines.h`.
+If the head of a tier has not been served for longer than its budget. 
+It gets one slice ahead of the higher tiers, at most once every 10ms per core. The values are in `source/defines.h`.
 
 ## CPU hotplug
 
