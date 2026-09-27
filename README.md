@@ -5,7 +5,8 @@
 
 Scx_lunar is a multipurpose scheduler which was originally invented with the goal to make frametimes in games as smooth as possible
 
-This scheduler uses only FIFO queues.
+Every cpu has 5 queues, one per band. The band is chosen by the nice value of a task,
+inside a band the tasks are ordered by vtime, so every task of a band gets its fair share.
 
 ## Dependencies
 
@@ -21,17 +22,15 @@ But this kernel option should be enabled by default, but not bad to check never 
 
 ## Important
 
-To have the scheduler work at its best, DONT modify the nice levels of kernel threads.
+The nice value decides the band of a task (see below). It does not change the slice or
+the share of cpu time, it only decides which band is served first.
 
-And maybe also don't use ananicy-cpp or ananicy.
+So nice values are the way to tell lunar what is important. Tools like ananicy-cpp can
+be used for that, for example to put audio into band 0, a game into band 1 and
+background work into band 3 or 4.
 
-you can disable them with
-
-`sudo systemctl disable --now ananicy-cpp.service`
-
-or
-
-`sudo systemctl disable --now ananicy.service`
+Audio (pipewire, pipewire-pulse, wireplumber) should run with realtime priority or at
+least with nice -11 or lower, so it lands in band 0 and nothing else can delay it.
 
 
 ## Building it
@@ -54,75 +53,91 @@ sudo ./uninstall.sh
 
 ## Explanation
 
-The scheduler works with accounting of duty and crit score.
+### Bands
 
-Duty goes from 0 to 1023.
+Every cpu has one queue per band. The band is chosen by the nice value:
 
-The higher the duty number the more the task hogs cpu power.
-The lower the more it is sleeping or dependent on io.
+| Band | Nice |
+|---|---|
+| 0 | -20 to -11 |
+| 1 | -10 to -3 |
+| 2 | -2 to 2 |
+| 3 | 3 to 10 |
+| 4 | 11 to 20 |
 
-Run time and sleep time are accumulated and both halved together once their sum
-exceeds 200ms, so the duty roughly reflects the last 100-200ms.
+Bands are served strictly in order. Most tasks run with nice 0, so they are in band 2.
+Band 0 holds high priority kernel threads (kworker/*H, ...) and everything that is
+reniced to -11 or lower.
 
-It is calculated like this.
+Kernel threads that are bound to one cpu (ksoftirqd/N, kworker/N:x, rcuc/N, ...) always
+go into band 0, whatever their nice value. Only they can do the work of their cpu, so
+they should never wait behind anything. Unbound kernel threads (kworker/u*) and user
+tasks pinned to one cpu are handled by their nice value like everything else.
 
-duty = run_time * 1024 / (run_time + sleep_time + 1)
+Every task has a slice of 1ms. Nice values don't change the slice.
 
-The Tier are calculated as Percent of the 1024 max duty value.
+### vtime inside a band
 
-crit score goes from 0 to 32.
+Inside a band the queue is ordered by vtime. Every task collects the cpu time it used,
+and the task that used the least runs first.
 
-It is based on the waker and wakee frequency of a task.
+Every cpu keeps a reference per band: the highest vtime that started running in that
+band on this cpu. When a task is queued, it gets
 
-it is calculated from
-log2(1s / wakee interval) + log2(1s / waker interval)
+key = reference + lag
 
-It has 3 tiers. Which are:
+lag is the lead (negative) or debt (positive) the task has against the reference,
+limited to +-1 slice. While a task sleeps the reference keeps moving, so sleeping pays
+off debt, but a task can never collect more than one slice of lead. That way a task
+which slept for a long time can't come back and hog the cpu (no lag bombs), and a task
+that runs rarely and shortly is always near the front of its band.
 
-1. LC with duty <= 5% and crit score of >= 5
-2. INTERACTIVE with duty <= 10% and crit score of >= 3
-3. NORMAL with duty <= 80% and crit score of >=1
-4. Greedy with everything else
+A new task starts exactly at the reference, without lead or debt.
 
-There is no hysteresis on the crit score. There is a hysteresis of 1% on the duty.
-
-All new tasks start in normal.
-There is also a min. sample rate of the duty value to be eligible for promotion into higher tiers.
-
-Every task has a slice time of 1ms.
-
-Nice values and scheduling policies are intentionally ignored. Every task is
-treated equally and only its behavior (duty and crit score) decides its tier.
+When a task is moved to another cpu it keeps its lag against the reference of the new
+cpu.
 
 ## Preemption
 
-A waking LC task preempts a running task of a lower tier. The preempted task goes
-back to the head of its queue with the rest of its slice.
+A waking task of a higher band preempts a running task of a lower band. Inside the same
+band a waking task preempts when its key is more than 0.25ms earlier than the current
+vtime of the running task, so when it used clearly less cpu. Tasks with similar usage
+don't preempt each other. The preempted task goes back into its queue with its vtime and
+the rest of its slice.
+
+When the slice of a task runs out, its vtime is updated. It keeps running for another
+slice if its band is better than every queued band on its cpu, or if in the same band
+its key is not later than the one of the first queued task. Otherwise it goes back into
+its queue.
 
 ## Placement and balancing
-
-Each core has its own queue per tier.
 
 When a task wakes up and an idle core is found, it runs there directly.
 Otherwise the task goes to the queue of the core with the least work ahead of it:
 
 - an idle core is always preferred
-- LC and INTERACTIVE tasks check all cores of the same llc, so they don't wait
-  behind a task of their own tier while another core runs lower tier work
-- NORMAL and GREEDY tasks compare their core with 2 random cores of the same llc
-  and move at most once every 10ms, which evens out long queues between busy cores
+- tasks of band 0 and 1 check all cores of the same llc
+- tasks of band 2, 3 and 4 compare their core with 2 random cores of the same llc
+  and move at most once every 10ms
+
+Idle cores only look for work when they are woken up. So when a core starts running a
+task while other tasks still wait in its queues (for example the task it just
+preempted), it wakes an idle core that is allowed to run the first waiting task, and
+that core takes it over.
 
 ## Dispatch
 
-Each core first runs its own LC tasks, then a starved tier if there is one, then
-its own INTERACTIVE, NORMAL and GREEDY tasks. After that it steals from another
-core of the same llc and then from cores of other llcs.
-From which core the core starts stealing is randomized for better load distribution.
+Each core first runs its own band 0, then a starved band if there is one, then its own
+bands 1, 2, 3 and 4. After that it steals from another core of the same llc and then
+from cores of other llcs, band by band. From which core the core starts stealing is
+randomized for better load distribution.
 
 ## Starvation
 
-If the head of a tier has not been served for longer than its budget. 
-It gets one slice ahead of the higher tiers, at most once every 10ms per core. The values are in `source/defines.h`.
+If the head of a band has not been served for longer than its budget
+(band 1 20ms, band 2 50ms, band 3 100ms, band 4 200ms), it gets one slice ahead of the
+higher bands, at most once every 10ms per core. Inside a band the vtime makes sure that
+nothing starves. The values are in `source/defines.h`.
 
 ## CPU hotplug
 

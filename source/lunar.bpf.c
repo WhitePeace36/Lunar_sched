@@ -17,83 +17,6 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-static __always_inline u64 tier_from_crit(s64 crit)
-{
-  if (crit >= CRIT_EDGE_LC)
-    return DSQ_TYPE_LC;
-  if (crit >= CRIT_EDGE_INTERACTIVE)
-    return DSQ_TYPE_INTERACTIVE;
-  if (crit >= CRIT_EDGE_NORMAL)
-    return DSQ_TYPE_NORMAL;
-  return DSQ_TYPE_GREEDY;
-}
-
-static __always_inline u64 tier_cap_from_duty(s64 duty)
-{
-  if (duty < DUTY_CAP_LC)
-    return DSQ_TYPE_LC;
-  if (duty < DUTY_CAP_INTERACTIVE)
-    return DSQ_TYPE_INTERACTIVE;
-  if (duty < DUTY_CAP_NORMAL)
-    return DSQ_TYPE_NORMAL;
-  return DSQ_TYPE_GREEDY;
-}
-
-static __always_inline u64 target_tier(s64 crit, s64 duty)
-{
-  u64 wanted = tier_from_crit(crit);
-  u64 allowed = tier_cap_from_duty(duty);
-  return wanted > allowed ? wanted : allowed;
-}
-
-static __always_inline u64 sanitize_tier(u64 tier)
-{
-  if (tier < DSQ_TYPE_LC || tier > DSQ_TYPE_GREEDY)
-    return DSQ_TYPE_GREEDY;
-  return tier;
-}
-
-static __always_inline void update_task_dsq_type(struct task_struct* task, struct task_ctx* tctx, u64 now)
-{
-  u64 old = tctx->current_dsq_type;
-
-  tctx->crit = calc_crit(tctx, now);
-
-  if (tctx->duty_samples < DUTY_SAMPLES_NEEDED)
-  {
-    tctx->current_dsq_type = DSQ_TYPE_GREEDY;
-  }
-  else
-  {
-    // No hysteresis on crit, only on duty.
-    s64 crit = tctx->crit;
-    u64 pessimistic = target_tier(crit, tctx->duty + DUTY_HYST);
-    u64 optimistic = target_tier(crit, tctx->duty - DUTY_HYST);
-
-    if (pessimistic < old)
-      tctx->current_dsq_type = pessimistic;
-    else if (optimistic > old)
-      tctx->current_dsq_type = optimistic;
-  }
-}
-
-static __always_inline void record_waker(struct task_struct* p, u64 now)
-{
-  if (bpf_in_interrupt())
-    return;
-
-  struct task_struct* waker = bpf_get_current_task_btf();
-  if (waker->pid == p->pid)
-    return;
-
-  struct task_ctx* wctx = get_task_ctx(waker);
-  if (!wctx)
-    return;
-
-  wctx->wake_interval = exponentially_weighted_moving_avg(wctx->wake_interval, clamp_interval(elapsed(now, wctx->last_wake_at)));
-  wctx->last_wake_at = now;
-}
-
 // callbacks
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
@@ -105,16 +28,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
   u32 cpu;
   bpf_for(cpu, 0, nr_cpu_ids)
   {
-    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_LC + cpu, -1);
+    ret = scx_bpf_create_dsq(band_dsq(BAND_0, cpu), -1);
     if (ret)
       return ret;
-    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_NORMAL + cpu, -1);
+    ret = scx_bpf_create_dsq(band_dsq(BAND_1, cpu), -1);
     if (ret)
       return ret;
-    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu, -1);
+    ret = scx_bpf_create_dsq(band_dsq(BAND_2, cpu), -1);
     if (ret)
       return ret;
-    ret = scx_bpf_create_dsq(DSQ_CPU_QUEUE_BASE_GREEDY + cpu, -1);
+    ret = scx_bpf_create_dsq(band_dsq(BAND_3, cpu), -1);
+    if (ret)
+      return ret;
+    ret = scx_bpf_create_dsq(band_dsq(BAND_4, cpu), -1);
     if (ret)
       return ret;
   }
@@ -125,12 +51,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
     if (!dispatch_ctx)
       return -ENOMEM;
 
-    dispatch_ctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
-
     u64 now = bpf_ktime_get_ns();
-    dispatch_ctx->tier_head_ts[DSQ_TYPE_INTERACTIVE] = now;
-    dispatch_ctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
-    dispatch_ctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
+    dispatch_ctx->running_band = BAND_AMOUNT;
+    dispatch_ctx->running_key = VTIME_BASE;
+
+    u32 band;
+    bpf_for(band, 0, BAND_AMOUNT)
+    {
+      if (band < BAND_AMOUNT)
+      {
+        dispatch_ctx->band_vtime[band] = VTIME_BASE;
+        dispatch_ctx->band_head_ts[band] = now;
+      }
+    }
+
     dispatch_ctx->last_override_ts = now;
     dispatch_ctx->preempt_pending = false;
   }
@@ -147,21 +81,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   if (!tctx)
     return -ENOMEM;
 
-  tctx->current_dsq_type = DSQ_TYPE_GREEDY;
+  // No cpu yet: task_lag() is 0, so a new task starts exactly at the band
+  // reference, without lead or debt.
+  tctx->key = VTIME_BASE;
+  tctx->key_cpu = KEY_CPU_NONE;
   tctx->started_at = now;
-  tctx->run_acc = DUTY_INIT_RUN_NS;
-  tctx->sleep_acc = 0;
-  tctx->duty_samples = 0;
   tctx->granted_slice = 0;
   tctx->resume_slice = 0;
   tctx->last_migrated_at = 0;
-
-  tctx->wait_interval = CRIT_INTERVAL_REF;
-  tctx->wake_interval = CRIT_INTERVAL_REF;
-  tctx->last_woken_at = now;
-  tctx->last_wake_at = now;
-  tctx->crit = 0;
-  tctx->duty = DUTY_RANGE / 2;
 
   return 0;
 }
@@ -174,7 +101,15 @@ s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wa
   s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
   if (is_idle)
+  {
+    struct task_ctx* tctx = get_task_ctx(p);
+    if (tctx)
+    {
+      tctx->key = task_key(get_dispatch_ctx(cpu), task_band(p), task_lag(tctx, task_band(p)));
+      tctx->key_cpu = cpu;
+    }
     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SLICE_NS, 0);
+  }
 
   return cpu;
 }
@@ -182,30 +117,37 @@ s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wa
 void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 {
   struct task_ctx* tctx = get_task_ctx(p);
-  u64 tier = tctx ? sanitize_tier(tctx->current_dsq_type) : DSQ_TYPE_GREEDY;
+  u64 band = task_band(p);
   u32 cpu = scx_bpf_task_cpu(p);
   u64 now = bpf_ktime_get_ns();
 
   if (tctx && tctx->resume_slice)
   {
     u64 slice = tctx->resume_slice;
-    u64 own_dsq = get_cpu_dsq_from_type(tier, cpu);
+    u64 own_dsq = band_dsq(band, cpu);
     struct dispatch_ctx* own = get_dispatch_ctx(cpu);
     tctx->resume_slice = 0;
-    if (own && tier != DSQ_TYPE_LC && dsq_queued(own_dsq) == 0)
-      stamp_tier_head_ts(own, tier, now);
-    scx_bpf_dsq_insert(p, own_dsq, slice, enq_flags | SCX_ENQ_HEAD);
+    if (own && band != BAND_0 && dsq_queued(own_dsq) == 0)
+      stamp_band_head_ts(own, band, now);
+    scx_bpf_dsq_insert_vtime(p, own_dsq, slice, tctx->key, enq_flags);
     return;
   }
 
-  u32 target = tctx ? (u32)pick_enqueue_cpu(p, tctx, tier, cpu, now) : cpu;
-  u64 dsq = get_cpu_dsq_from_type(tier, target);
+  u32 target = tctx ? (u32)pick_enqueue_cpu(p, tctx, band, cpu, now) : cpu;
+  u64 dsq = band_dsq(band, target);
   struct dispatch_ctx* dctx = get_dispatch_ctx(target);
 
-  if (dctx && tier != DSQ_TYPE_LC && dsq_queued(dsq) == 0)
-    stamp_tier_head_ts(dctx, tier, now);
+  u64 key = task_key(dctx, band, tctx ? task_lag(tctx, band) : 0);
+  if (tctx)
+  {
+    tctx->key = key;
+    tctx->key_cpu = target;
+  }
 
-  scx_bpf_dsq_insert(p, dsq, SLICE_NS, enq_flags);
+  if (dctx && band != BAND_0 && dsq_queued(dsq) == 0)
+    stamp_band_head_ts(dctx, band, now);
+
+  scx_bpf_dsq_insert_vtime(p, dsq, SLICE_NS, key, enq_flags);
 
   if (!dctx)
   {
@@ -213,12 +155,24 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
     return;
   }
 
-  u64 running = dctx->current_task_dsq_type;
-  if (running == DSQ_TYPE_EMPTY)
+  u64 running_band = dctx->running_band;
+  if (running_band >= BAND_AMOUNT)
   {
     scx_bpf_kick_cpu(target, SCX_KICK_IDLE);
+    return;
   }
-  else if (tier == DSQ_TYPE_LC && (enq_flags & SCX_ENQ_WAKEUP) && running > tier)
+
+  if (!(enq_flags & SCX_ENQ_WAKEUP) || band > running_band)
+    return;
+
+  bool preempt = band < running_band;
+  if (!preempt)
+  {
+    u64 running_vtime = dctx->running_key + elapsed(now, dctx->running_since);
+    preempt = (s64)(running_vtime - key) > (s64)SAME_BAND_PREEMPT_GRAN_NS;
+  }
+
+  if (preempt)
   {
     dctx->preempt_pending = true;
     scx_bpf_kick_cpu(target, SCX_KICK_PREEMPT);
@@ -227,7 +181,38 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
 {
-  dispatch_dsq_per_cpu(cpu);
+  u64 prev_band = BAND_AMOUNT;
+  u64 prev_key = (u64)-1;
+  struct task_ctx* pctx = NULL;
+  struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
+  u64 now = bpf_ktime_get_ns();
+
+  if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+  {
+    pctx = get_task_ctx(prev);
+    if (pctx && dctx)
+    {
+      prev_band = task_band(prev);
+      u64 used = elapsed(now, pctx->started_at);
+      pctx->granted_slice = pctx->granted_slice > used ? pctx->granted_slice - used : 0;
+      pctx->key += used;
+      prev_key = task_key(dctx, prev_band, task_lag(pctx, prev_band));
+      pctx->key = prev_key;
+      pctx->key_cpu = cpu;
+      pctx->started_at = now;
+    }
+  }
+
+  if (!dispatch_dsq_per_cpu(cpu, prev_band, prev_key) || !prev || !pctx || !dctx)
+    return;
+
+  prev->scx.slice = SLICE_NS;
+  pctx->granted_slice = SLICE_NS;
+  advance_band_reference(dctx, prev_band, prev_key);
+  dctx->running_band = prev_band;
+  dctx->running_key = prev_key;
+  dctx->running_since = now;
+  dctx->preempt_pending = false;
 }
 
 void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
@@ -241,14 +226,24 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   if (!dispatch_ctx)
     return;
 
-  dispatch_ctx->current_task_dsq_type = sanitize_tier(context->current_dsq_type);
+  u64 band = task_band(p);
+
+  if (context->key_cpu != cpu)
+  {
+    context->key = task_key(dispatch_ctx, band, task_lag(context, band));
+    context->key_cpu = cpu;
+  }
+
+  advance_band_reference(dispatch_ctx, band, context->key);
+  dispatch_ctx->running_band = band;
+  dispatch_ctx->running_key = context->key;
   dispatch_ctx->preempt_pending = false;
 
   context->started_at = bpf_ktime_get_ns();
+  dispatch_ctx->running_since = context->started_at;
   context->granted_slice = p->scx.slice;
 
-  // bpf_printk("lunar_run cpu=%d pid=%d tgid=%d comm=%s dsqType=%llu duty=%lld crit=%d ", bpf_get_smp_processor_id(), p->pid, p->tgid, p->comm, context->current_dsq_type,
-  //            context->duty, context->crit);
+  kick_idle_for_waiting(cpu);
 }
 
 void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
@@ -259,22 +254,18 @@ void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
   if (!tctx)
     return;
 
-  u64 used_ns = elapsed(now, tctx->started_at);
-
-  duty_account(tctx, used_ns, 0);
-  tctx->duty = task_duty(tctx);
-
-  update_task_dsq_type(task, tctx, now);
-
   struct dispatch_ctx* dctx = get_dispatch_ctx(bpf_get_smp_processor_id());
   if (!dctx)
     return;
+
+  u64 used_ns = elapsed(now, tctx->started_at);
+  tctx->key += used_ns;
 
   if (dctx->preempt_pending && runnable && tctx->granted_slice > used_ns + RESUME_SLICE_MIN_NS)
     tctx->resume_slice = tctx->granted_slice - used_ns;
 
   dctx->preempt_pending = false;
-  dctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
+  dctx->running_band = BAND_AMOUNT;
 }
 
 void BPF_STRUCT_OPS(lunar_exit, struct scx_exit_info* ei)
@@ -289,36 +280,6 @@ void BPF_STRUCT_OPS(lunar_quiescent, struct task_struct* p, u64 deq_flags)
     return;
 
   tctx->resume_slice = 0;
-  tctx->blocked_at = (deq_flags & SCX_DEQ_SLEEP) ? bpf_ktime_get_ns() : 0;
-}
-
-void BPF_STRUCT_OPS(lunar_runnable, struct task_struct* p, u64 enq_flags)
-{
-  struct task_ctx* tctx = get_task_ctx(p);
-  u64 now = bpf_ktime_get_ns();
-
-  if (!tctx)
-    return;
-
-  if (enq_flags & SCX_ENQ_WAKEUP)
-  {
-    tctx->wait_interval = exponentially_weighted_moving_avg(tctx->wait_interval, clamp_interval(elapsed(now, tctx->last_woken_at)));
-    tctx->last_woken_at = now;
-    record_waker(p, now);
-  }
-
-  if (tctx->blocked_at)
-  {
-    duty_account(tctx, 0, elapsed(now, tctx->blocked_at));
-    tctx->duty_samples++;
-    if (tctx->duty_samples > DUTY_SAMPLES_MAX)
-    {
-      tctx->duty_samples = DUTY_SAMPLES_MAX;
-    }
-    tctx->blocked_at = 0;
-    tctx->duty = task_duty(tctx);
-    update_task_dsq_type(p, tctx, now);
-  }
 }
 
 SCX_OPS_DEFINE(lunar_ops,
@@ -326,7 +287,6 @@ SCX_OPS_DEFINE(lunar_ops,
                .init_task = (void*)lunar_init_task,
                .exit_task = (void*)lunar_exit_task,
                .select_cpu = (void*)lunar_select_cpu,
-               .runnable = (void*)lunar_runnable,
                .quiescent = (void*)lunar_quiescent,
                .running = (void*)lunar_running,
                .enqueue = (void*)lunar_enqueue,

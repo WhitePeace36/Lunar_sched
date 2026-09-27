@@ -14,29 +14,26 @@ const volatile u32 cpu_to_llc[MAX_CPUS] = {};
 
 struct task_ctx
 {
-  u64 current_dsq_type;
-  u64 blocked_at;
-  s64 duty;
-  u64 run_acc;
-  u64 sleep_acc;
+  // vtime of the task on the band timeline of @key_cpu: the key it was queued
+  // with plus the cpu time it used since then
+  u64 key;
+  u32 key_cpu;
   u64 started_at;
-  u64 duty_samples;
 
   u64 granted_slice;
   u64 resume_slice;
   u64 last_migrated_at;
-
-  u64 wait_interval;
-  u64 wake_interval;
-  u64 last_woken_at;
-  u64 last_wake_at;
-  u32 crit;
 };
 
 struct dispatch_ctx
 {
-  u64 current_task_dsq_type;
-  u64 tier_head_ts[DSQ_TYPE_AMOUNT + 1];
+  // band and key of the task running on this cpu (BAND_AMOUNT: none)
+  u64 running_band;
+  u64 running_key;
+  u64 running_since;
+  // vtime reference per band: the highest key started on this cpu
+  u64 band_vtime[BAND_AMOUNT];
+  u64 band_head_ts[BAND_AMOUNT];
   u64 last_override_ts;
   bool preempt_pending;
 };

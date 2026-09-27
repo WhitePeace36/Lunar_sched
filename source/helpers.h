@@ -10,41 +10,77 @@
 #include "datatypes.h"
 #include "defines.h"
 
-static __always_inline u64 get_cpu_dsq_from_type(u64 dsqType, u32 cpu)
+static __always_inline u64 sanitize_band(u64 band)
 {
-  switch (dsqType)
-  {
-    case DSQ_TYPE_LC:
-      return DSQ_CPU_QUEUE_BASE_LC + cpu;
-    case DSQ_TYPE_INTERACTIVE:
-      return DSQ_CPU_QUEUE_BASE_INTERACTIVE + cpu;
-    case DSQ_TYPE_NORMAL:
-      return DSQ_CPU_QUEUE_BASE_NORMAL + cpu;
-  }
-  return DSQ_CPU_QUEUE_BASE_GREEDY + cpu;
+  return band < BAND_AMOUNT ? band : BAND_AMOUNT - 1;
 }
 
-// scx_bpf_dsq_nr_queued() returns a negative error for an invalid DSQ.
+static __always_inline u64 band_dsq(u64 band, u32 cpu)
+{
+  return DSQ_BASE + sanitize_band(band) * DSQ_BAND_STRIDE + cpu;
+}
+
+static __always_inline bool is_percpu_kthread(const struct task_struct* p)
+{
+  return (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1;
+}
+
+static __always_inline u64 task_band(const struct task_struct* p)
+{
+  if (is_percpu_kthread(p))
+    return BAND_0;
+
+  int nice = p->static_prio - NICE_0_PRIO;
+
+  if (nice <= BAND_0_MAX_NICE)
+    return BAND_0;
+  if (nice <= BAND_1_MAX_NICE)
+    return BAND_1;
+  if (nice <= BAND_2_MAX_NICE)
+    return BAND_2;
+  if (nice <= BAND_3_MAX_NICE)
+    return BAND_3;
+  return BAND_4;
+}
+
 static __always_inline u64 dsq_queued(u64 dsq)
 {
   s32 n = scx_bpf_dsq_nr_queued(dsq);
   return n > 0 ? (u64)n : 0;
 }
 
-static __always_inline void stamp_tier_head_ts(struct dispatch_ctx* dctx, u64 dsqType, u64 now)
+static __always_inline void stamp_band_head_ts(struct dispatch_ctx* dctx, u64 band, u64 now)
 {
-  switch (dsqType)
-  {
-    case DSQ_TYPE_INTERACTIVE:
-      dctx->tier_head_ts[DSQ_TYPE_INTERACTIVE] = now;
-      return;
-    case DSQ_TYPE_NORMAL:
-      dctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
-      return;
-    case DSQ_TYPE_GREEDY:
-      dctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
-      return;
-  }
+  if (band < BAND_AMOUNT)
+    dctx->band_head_ts[band] = now;
+}
+
+static __always_inline u64 band_reference(struct dispatch_ctx* dctx, u64 band)
+{
+  if (band < BAND_AMOUNT)
+    return dctx->band_vtime[band];
+  return VTIME_BASE;
+}
+
+static __always_inline void advance_band_reference(struct dispatch_ctx* dctx, u64 band, u64 key)
+{
+  if (band < BAND_AMOUNT && (s64)(key - dctx->band_vtime[band]) > 0)
+    dctx->band_vtime[band] = key;
+}
+
+static __always_inline s64 clamp_lag(s64 lag)
+{
+  if (lag > (s64)LAG_MAX_NS)
+    return LAG_MAX_NS;
+  if (lag < -(s64)LAG_MAX_NS)
+    return -(s64)LAG_MAX_NS;
+  return lag;
+}
+
+static __always_inline u64 task_key(struct dispatch_ctx* dctx, u64 band, s64 lag)
+{
+  u64 reference = dctx ? band_reference(dctx, band) : VTIME_BASE;
+  return reference + lag;
 }
 
 static __always_inline struct task_ctx* get_task_ctx(struct task_struct* task)
@@ -64,68 +100,19 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
   return cpu_to_llc[cpu];
 }
 
-static __always_inline u32 task_duty(const struct task_ctx* tctx)
-{
-  return (tctx->run_acc << 10) / (tctx->run_acc + tctx->sleep_acc + 1);
-}
-
-static __always_inline void duty_account(struct task_ctx* tctx, u64 run, u64 slept)
-{
-  if (run > DUTY_WINDOW_NS)
-    run = DUTY_WINDOW_NS;
-  if (slept > DUTY_WINDOW_NS)
-    slept = DUTY_WINDOW_NS;
-
-  tctx->run_acc += run;
-  tctx->sleep_acc += slept;
-
-  if (tctx->run_acc + tctx->sleep_acc > 2 * DUTY_WINDOW_NS)
-  {
-    tctx->run_acc >>= 1;
-    tctx->sleep_acc >>= 1;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Latency criticality
-// ---------------------------------------------------------------------------
-
-static __always_inline u64 exponentially_weighted_moving_avg(u64 old, u64 sample)
-{
-  return old - (old >> 2) + (sample >> 2);
-}
-
-static __always_inline u32 ilog2(u64 v)
-{
-  return v ? log2_u64(v) - 1 : 0;
-}
-
 static __always_inline u64 elapsed(u64 now, u64 last)
 {
   return now > last ? now - last : 0;
 }
 
-static __always_inline u64 clamp_interval(u64 interval)
+static __always_inline s64 task_lag(struct task_ctx* tctx, u64 band)
 {
-  if (interval < CRIT_INTERVAL_MIN)
-    return CRIT_INTERVAL_MIN;
-  if (interval > CRIT_INTERVAL_REF)
-    return CRIT_INTERVAL_REF;
-  return interval;
-}
-
-static __always_inline u64 effective_interval(u64 avg, u64 last, u64 now)
-{
-  u64 since = elapsed(now, last);
-  return clamp_interval(since > (avg * 8) ? since : avg);
-}
-
-static __always_inline u32 calc_crit(struct task_ctx* tctx, u64 now)
-{
-  u32 crit = ilog2(CRIT_INTERVAL_REF / effective_interval(tctx->wait_interval, tctx->last_woken_at, now)) +
-             ilog2(CRIT_INTERVAL_REF / effective_interval(tctx->wake_interval, tctx->last_wake_at, now));
-
-  return crit > CRIT_MAX ? CRIT_MAX : crit;
+  if (tctx->key_cpu == KEY_CPU_NONE)
+    return 0;
+  struct dispatch_ctx* from = get_dispatch_ctx(tctx->key_cpu);
+  if (!from)
+    return 0;
+  return clamp_lag((s64)(tctx->key - band_reference(from, band)));
 }
 
 #endif  // HELPERS_H

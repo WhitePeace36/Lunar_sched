@@ -12,32 +12,30 @@
 #include "datatypes.h"
 #include "helpers.h"
 
-// ---------------------------------------------------------------------------
-// Placement (enqueue side)
-// ---------------------------------------------------------------------------
-
-static __always_inline u64 cpu_load_ahead(u32 cpu, u64 tier)
+static __always_inline u64 cpu_load_ahead(u32 cpu, u64 band)
 {
   u64 load = 0;
 
   struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
-  if (dctx && dctx->current_task_dsq_type <= tier)
+  if (dctx && dctx->running_band <= band)
     load++;
 
-  load += dsq_queued(get_cpu_dsq_from_type(DSQ_TYPE_LC, cpu));
-  if (tier >= DSQ_TYPE_INTERACTIVE)
-    load += dsq_queued(get_cpu_dsq_from_type(DSQ_TYPE_INTERACTIVE, cpu));
-  if (tier >= DSQ_TYPE_NORMAL)
-    load += dsq_queued(get_cpu_dsq_from_type(DSQ_TYPE_NORMAL, cpu));
-  if (tier >= DSQ_TYPE_GREEDY)
-    load += dsq_queued(get_cpu_dsq_from_type(DSQ_TYPE_GREEDY, cpu));
+  load += dsq_queued(band_dsq(BAND_0, cpu));
+  if (band >= BAND_1)
+    load += dsq_queued(band_dsq(BAND_1, cpu));
+  if (band >= BAND_2)
+    load += dsq_queued(band_dsq(BAND_2, cpu));
+  if (band >= BAND_3)
+    load += dsq_queued(band_dsq(BAND_3, cpu));
+  if (band >= BAND_4)
+    load += dsq_queued(band_dsq(BAND_4, cpu));
 
   return load;
 }
 
-static __always_inline s32 pick_enqueue_cpu(struct task_struct* p, struct task_ctx* tctx, u64 tier, u32 cpu, u64 now)
+static __always_inline s32 pick_enqueue_cpu(struct task_struct* p, struct task_ctx* tctx, u64 band, u32 cpu, u64 now)
 {
-  u64 best_load = cpu_load_ahead(cpu, tier);
+  u64 best_load = cpu_load_ahead(cpu, band);
   if (best_load == 0)
     return cpu;
 
@@ -52,8 +50,8 @@ static __always_inline s32 pick_enqueue_cpu(struct task_struct* p, struct task_c
     return idle;
   }
 
-  bool latency_tier = tier <= DSQ_TYPE_INTERACTIVE;
-  if (!latency_tier && now - tctx->last_migrated_at < BALANCE_INTERVAL_NS)
+  bool scan_whole_llc = band <= BAND_SCAN_WHOLE_LLC;
+  if (!scan_whole_llc && now - tctx->last_migrated_at < BALANCE_INTERVAL_NS)
     return cpu;
 
   u32 key = 0;
@@ -68,7 +66,7 @@ static __always_inline s32 pick_enqueue_cpu(struct task_struct* p, struct task_c
   u32 my_llc = cpu_llc_id(cpu);
   u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
   u32 start = bpf_get_prandom_u32() % nr_cpu_ids;
-  u32 budget = latency_tier ? nr_cpu_ids : BALANCE_SAMPLES;
+  u32 budget = scan_whole_llc ? nr_cpu_ids : BALANCE_SAMPLES;
   u32 i;
 
   bpf_for(i, 0, nr_cpu_ids)
@@ -79,7 +77,7 @@ static __always_inline s32 pick_enqueue_cpu(struct task_struct* p, struct task_c
     if (!bpf_cpumask_test_cpu(other, p->cpus_ptr))
       continue;
 
-    u64 load = cpu_load_ahead(other, tier);
+    u64 load = cpu_load_ahead(other, band);
     if (load < sc->best_load)
     {
       sc->best_load = load;
@@ -92,16 +90,17 @@ static __always_inline s32 pick_enqueue_cpu(struct task_struct* p, struct task_c
       break;
   }
 
-  if ((u32)sc->best != cpu)
+  s32 best = sc->best;
+  if ((u32)best != cpu)
     tctx->last_migrated_at = now;
-  return sc->best;
+  return best;
 }
 
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
-static __always_inline u64 try_acquire_task_from_other_cpu(u64 dsqType, u32 cpu, bool sameLLC, u64 now)
+static __always_inline bool try_acquire_task_from_other_cpu(u64 band, u32 cpu, bool sameLLC, u64 now)
 {
   u32 my_llc = cpu_llc_id(cpu);
   u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
@@ -118,122 +117,197 @@ static __always_inline u64 try_acquire_task_from_other_cpu(u64 dsqType, u32 cpu,
     if (!sameLLC && cpu_llc_id(other) == my_llc)
       continue;
 
-    u64 dsq = get_cpu_dsq_from_type(dsqType, other);
+    u64 dsq = band_dsq(band, other);
 
     if (dsq_queued(dsq) && scx_bpf_dsq_move_to_local(dsq, 0))
     {
+      // The victim's band head was just served: reset its starvation clock.
       struct dispatch_ctx* victim = get_dispatch_ctx(other);
       if (victim)
-        stamp_tier_head_ts(victim, dsqType, now);
-      return dsqType;
+        stamp_band_head_ts(victim, band, now);
+      return true;
     }
   }
-  return DSQ_TYPE_EMPTY;
+  return false;
 }
 
-static __always_inline s64 tier_overrun(struct dispatch_ctx* dctx, u64 dsqType, u32 cpu, u64 now, u64 budget)
+static __always_inline s64 band_overrun(struct dispatch_ctx* dctx, u64 band, u32 cpu, u64 now, u64 budget)
 {
-  if (!dsq_queued(get_cpu_dsq_from_type(dsqType, cpu)))
+  if (band >= BAND_AMOUNT || !dsq_queued(band_dsq(band, cpu)))
     return 0;
-  return (s64)(now - dctx->tier_head_ts[dsqType]) - (s64)budget;
+  return (s64)(now - dctx->band_head_ts[band]) - (s64)budget;
 }
 
-static __always_inline u64 most_starved_tier(struct dispatch_ctx* dctx, u32 cpu, u64 now)
+static __always_inline u64 most_starved_band(struct dispatch_ctx* dctx, u32 cpu, u64 now)
 {
   if (now - dctx->last_override_ts < STARVE_OVERRIDE_COOLDOWN_NS)
-    return DSQ_TYPE_EMPTY;
+    return BAND_AMOUNT;
 
-  u64 worst_type = DSQ_TYPE_EMPTY;
+  u64 worst_band = BAND_AMOUNT;
   s64 worst_overrun = 0;
   s64 overrun;
 
-  overrun = tier_overrun(dctx, DSQ_TYPE_INTERACTIVE, cpu, now, STARVE_BUDGET_INTERACTIVE_NS);
+  overrun = band_overrun(dctx, BAND_1, cpu, now, STARVE_BUDGET_BAND_1_NS);
   if (overrun > worst_overrun)
   {
     worst_overrun = overrun;
-    worst_type = DSQ_TYPE_INTERACTIVE;
+    worst_band = BAND_1;
   }
 
-  overrun = tier_overrun(dctx, DSQ_TYPE_NORMAL, cpu, now, STARVE_BUDGET_NORMAL_NS);
+  overrun = band_overrun(dctx, BAND_2, cpu, now, STARVE_BUDGET_BAND_2_NS);
   if (overrun > worst_overrun)
   {
     worst_overrun = overrun;
-    worst_type = DSQ_TYPE_NORMAL;
+    worst_band = BAND_2;
   }
 
-  overrun = tier_overrun(dctx, DSQ_TYPE_GREEDY, cpu, now, STARVE_BUDGET_GREEDY_NS);
+  overrun = band_overrun(dctx, BAND_3, cpu, now, STARVE_BUDGET_BAND_3_NS);
   if (overrun > worst_overrun)
   {
     worst_overrun = overrun;
-    worst_type = DSQ_TYPE_GREEDY;
+    worst_band = BAND_3;
   }
 
-  return worst_type;
+  overrun = band_overrun(dctx, BAND_4, cpu, now, STARVE_BUDGET_BAND_4_NS);
+  if (overrun > worst_overrun)
+  {
+    worst_overrun = overrun;
+    worst_band = BAND_4;
+  }
+
+  return worst_band;
 }
 
-static __always_inline bool take_from_local_tier(struct dispatch_ctx* dctx, u64 dsqType, u32 cpu, u64 now)
+static __always_inline bool take_from_local_band(struct dispatch_ctx* dctx, u64 band, u32 cpu, u64 now)
 {
-  u64 dsq = get_cpu_dsq_from_type(dsqType, cpu);
+  u64 dsq = band_dsq(band, cpu);
   if (!dsq_queued(dsq) || !scx_bpf_dsq_move_to_local(dsq, 0))
     return false;
 
   if (dctx)
-    stamp_tier_head_ts(dctx, dsqType, now);
+    stamp_band_head_ts(dctx, band, now);
   return true;
 }
 
-static __always_inline bool take_from_other_tier(u64 dsqType, u32 cpu, u64 now, bool thisLLC)
+static __always_inline u64 dsq_head_key(u64 dsq)
 {
-  return try_acquire_task_from_other_cpu(dsqType, cpu, thisLLC, now) != DSQ_TYPE_EMPTY;
+  struct task_struct* p;
+  u64 key = (u64)-1;
+
+  bpf_for_each(scx_dsq, p, dsq, 0)
+  {
+    key = p->scx.dsq_vtime;
+    break;
+  }
+  return key;
 }
 
-static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
+static __always_inline void kick_idle_for_waiting(u32 cpu)
+{
+  struct task_struct* p;
+  u32 band;
+
+  bpf_for(band, 0, BAND_AMOUNT)
+  {
+    bpf_for_each(scx_dsq, p, band_dsq(band, cpu), 0)
+    {
+      if (p->nr_cpus_allowed > 1)
+      {
+        s32 idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+        if (idle >= 0)
+          scx_bpf_kick_cpu(idle, SCX_KICK_IDLE);
+        return;
+      }
+      break;
+    }
+  }
+}
+
+#define SERVE_CONTINUE 0
+#define SERVE_KEEP_PREV 1
+#define SERVE_TOOK_TASK 2
+
+static __always_inline int serve_local_band(struct dispatch_ctx* dctx, u64 band, u32 cpu, u64 now, u64 prev_band, u64 prev_key)
+{
+  if (prev_band < band)
+    return SERVE_KEEP_PREV;
+
+  u64 dsq = band_dsq(band, cpu);
+  if (prev_band == band && (s64)(prev_key - dsq_head_key(dsq)) <= 0)
+    return SERVE_KEEP_PREV;
+
+  if (take_from_local_band(dctx, band, cpu, now))
+    return SERVE_TOOK_TASK;
+
+  if (prev_band == band)
+    return SERVE_KEEP_PREV;
+  return SERVE_CONTINUE;
+}
+
+static __always_inline bool dispatch_dsq_per_cpu(u32 cpu, u64 prev_band, u64 prev_key)
 {
   struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
   u64 now = bpf_ktime_get_ns();
+  int ret;
 
-  if (take_from_local_tier(dctx, DSQ_TYPE_LC, cpu, now))
-    return DSQ_TYPE_LC;
+  // A queued band 0 task first, unless prev is band 0 with an earlier key.
+  if (!(prev_band == BAND_0 && (s64)(prev_key - dsq_head_key(band_dsq(BAND_0, cpu))) <= 0) && take_from_local_band(dctx, BAND_0, cpu, now))
+    return false;
 
+  // A starved band goes before prev too, otherwise a running band 0 task would
+  // never let the lower bands get their minimum.
   if (dctx)
   {
-    u64 starved = most_starved_tier(dctx, cpu, now);
-    if (starved != DSQ_TYPE_EMPTY && take_from_local_tier(dctx, starved, cpu, now))
+    u64 starved = most_starved_band(dctx, cpu, now);
+    if (starved != BAND_AMOUNT && take_from_local_band(dctx, starved, cpu, now))
     {
       dctx->last_override_ts = now;
-      return starved;
+      return false;
     }
   }
 
-  if (take_from_local_tier(dctx, DSQ_TYPE_INTERACTIVE, cpu, now))
-    return DSQ_TYPE_INTERACTIVE;
-  if (take_from_local_tier(dctx, DSQ_TYPE_NORMAL, cpu, now))
-    return DSQ_TYPE_NORMAL;
-  if (take_from_local_tier(dctx, DSQ_TYPE_GREEDY, cpu, now))
-    return DSQ_TYPE_GREEDY;
+  ret = serve_local_band(dctx, BAND_0, cpu, now, prev_band, prev_key);
+  if (ret != SERVE_CONTINUE)
+    return ret == SERVE_KEEP_PREV;
+  ret = serve_local_band(dctx, BAND_1, cpu, now, prev_band, prev_key);
+  if (ret != SERVE_CONTINUE)
+    return ret == SERVE_KEEP_PREV;
+  ret = serve_local_band(dctx, BAND_2, cpu, now, prev_band, prev_key);
+  if (ret != SERVE_CONTINUE)
+    return ret == SERVE_KEEP_PREV;
+  ret = serve_local_band(dctx, BAND_3, cpu, now, prev_band, prev_key);
+  if (ret != SERVE_CONTINUE)
+    return ret == SERVE_KEEP_PREV;
+  ret = serve_local_band(dctx, BAND_4, cpu, now, prev_band, prev_key);
+  if (ret != SERVE_CONTINUE)
+    return ret == SERVE_KEEP_PREV;
 
-  if (take_from_other_tier(DSQ_TYPE_LC, cpu, now, true))
-    return DSQ_TYPE_LC;
-  if (take_from_other_tier(DSQ_TYPE_INTERACTIVE, cpu, now, true))
-    return DSQ_TYPE_INTERACTIVE;
-  if (take_from_other_tier(DSQ_TYPE_NORMAL, cpu, now, true))
-    return DSQ_TYPE_NORMAL;
-  if (take_from_other_tier(DSQ_TYPE_GREEDY, cpu, now, true))
-    return DSQ_TYPE_GREEDY;
+  if (try_acquire_task_from_other_cpu(BAND_0, cpu, true, now))
+    return false;
+  if (try_acquire_task_from_other_cpu(BAND_1, cpu, true, now))
+    return false;
+  if (try_acquire_task_from_other_cpu(BAND_2, cpu, true, now))
+    return false;
+  if (try_acquire_task_from_other_cpu(BAND_3, cpu, true, now))
+    return false;
+  if (try_acquire_task_from_other_cpu(BAND_4, cpu, true, now))
+    return false;
 
   if (nr_llcs > 1)
   {
-    if (take_from_other_tier(DSQ_TYPE_LC, cpu, now, false))
-      return DSQ_TYPE_LC;
-    if (take_from_other_tier(DSQ_TYPE_INTERACTIVE, cpu, now, false))
-      return DSQ_TYPE_INTERACTIVE;
-    if (take_from_other_tier(DSQ_TYPE_NORMAL, cpu, now, false))
-      return DSQ_TYPE_NORMAL;
-    if (take_from_other_tier(DSQ_TYPE_GREEDY, cpu, now, false))
-      return DSQ_TYPE_GREEDY;
+    if (try_acquire_task_from_other_cpu(BAND_0, cpu, false, now))
+      return false;
+    if (try_acquire_task_from_other_cpu(BAND_1, cpu, false, now))
+      return false;
+    if (try_acquire_task_from_other_cpu(BAND_2, cpu, false, now))
+      return false;
+    if (try_acquire_task_from_other_cpu(BAND_3, cpu, false, now))
+      return false;
+    if (try_acquire_task_from_other_cpu(BAND_4, cpu, false, now))
+      return false;
   }
 
-  return DSQ_TYPE_EMPTY;
+  return false;
 }
 
 #endif  // DISPATCHES_H
