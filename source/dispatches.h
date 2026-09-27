@@ -187,7 +187,7 @@ static __always_inline bool take_from_other_tier(u64 dsqType, u32 cpu, u64 now, 
   return try_acquire_task_from_other_cpu(dsqType, cpu, thisLLC, now) != DSQ_TYPE_EMPTY;
 }
 
-static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
+static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu, u64 prev_tier)
 {
   struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
   u64 now = bpf_ktime_get_ns();
@@ -205,12 +205,20 @@ static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
     }
   }
 
+  if (prev_tier < DSQ_TYPE_INTERACTIVE)
+    return DSQ_TYPE_EMPTY;
   if (take_from_local_tier(dctx, DSQ_TYPE_INTERACTIVE, cpu, now))
     return DSQ_TYPE_INTERACTIVE;
+  if (prev_tier < DSQ_TYPE_NORMAL)
+    return DSQ_TYPE_EMPTY;
   if (take_from_local_tier(dctx, DSQ_TYPE_NORMAL, cpu, now))
     return DSQ_TYPE_NORMAL;
+  if (prev_tier < DSQ_TYPE_GREEDY)
+    return DSQ_TYPE_EMPTY;
   if (take_from_local_tier(dctx, DSQ_TYPE_GREEDY, cpu, now))
     return DSQ_TYPE_GREEDY;
+  if (prev_tier <= DSQ_TYPE_GREEDY)
+    return DSQ_TYPE_EMPTY;
 
   if (take_from_other_tier(DSQ_TYPE_LC, cpu, now, true))
     return DSQ_TYPE_LC;
@@ -233,7 +241,7 @@ static __always_inline u64 dispatch_dsq_per_cpu(u32 cpu)
       return DSQ_TYPE_GREEDY;
   }
 
-  return DSQ_TYPE_EMPTY;
+  return DSQ_TYPE_EMPTY + 1;
 }
 
 #endif  // DISPATCHES_H

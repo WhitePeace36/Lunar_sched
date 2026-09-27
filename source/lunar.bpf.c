@@ -65,7 +65,6 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
   }
   else
   {
-    // No hysteresis on crit, only on duty.
     s64 crit = tctx->crit;
     u64 pessimistic = target_tier(crit, tctx->duty + DUTY_HYST);
     u64 optimistic = target_tier(crit, tctx->duty - DUTY_HYST);
@@ -75,6 +74,9 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
     else if (optimistic > old)
       tctx->current_dsq_type = optimistic;
   }
+
+  if ((task->flags & PF_KTHREAD) && tctx->duty < DUTY_CAP_INTERACTIVE && tctx->current_dsq_type > DSQ_TYPE_INTERACTIVE)
+    tctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
 }
 
 static __always_inline void record_waker(struct task_struct* p, u64 now)
@@ -163,6 +165,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
   tctx->crit = 0;
   tctx->duty = DUTY_RANGE / 2;
 
+  if (p->flags & PF_KTHREAD)
+  {
+    tctx->run_acc = (KTHREAD_INIT_DUTY_PCT * DUTY_WINDOW_NS) / 100;
+    tctx->sleep_acc = DUTY_WINDOW_NS - tctx->run_acc;
+    tctx->duty_samples = DUTY_SAMPLES_NEEDED;
+    tctx->duty = task_duty(tctx);
+    tctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
+  }
+
   return 0;
 }
 
@@ -227,7 +238,32 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
 {
-  dispatch_dsq_per_cpu(cpu);
+  u64 prev_tier = DSQ_TYPE_EMPTY;
+  struct task_ctx* pctx = NULL;
+
+  if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+  {
+    pctx = get_task_ctx(prev);
+    if (pctx)
+    {
+      u64 now = bpf_ktime_get_ns();
+      duty_account(pctx, elapsed(now, pctx->started_at), 0);
+      pctx->started_at = now;
+      pctx->duty = task_duty(pctx);
+      update_task_dsq_type(prev, pctx, now);
+      prev_tier = sanitize_tier(pctx->current_dsq_type);
+    }
+  }
+
+  if (dispatch_dsq_per_cpu(cpu, prev_tier) != DSQ_TYPE_EMPTY || !prev || !pctx)
+    return;
+
+  prev->scx.slice = SLICE_NS;
+  pctx->granted_slice = SLICE_NS;
+
+  struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
+  if (dctx)
+    dctx->current_task_dsq_type = prev_tier;
 }
 
 void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)

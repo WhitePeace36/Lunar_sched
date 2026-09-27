@@ -99,6 +99,11 @@ treated equally and only its behavior (duty and crit score) decides its tier.
 A waking LC task preempts a running task of a lower tier. The preempted task goes
 back to the head of its queue with the rest of its slice.
 
+Kernel threads start in INTERACTIVE with a duty of 8% and complete duty samples.
+Their crit score is ignored, because they wake rarely even when they are important.
+As long as their duty stays under 10% they are at least INTERACTIVE, otherwise
+they are classified like every other task.
+
 ## Placement and balancing
 
 Each core has its own queue per tier.
