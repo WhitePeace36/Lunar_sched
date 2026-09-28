@@ -134,6 +134,8 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   }
 
   u32 target = tctx ? (u32)pick_enqueue_cpu(p, tctx, band, cpu, now) : cpu;
+  if (!cpu_is_online(target))
+    target = cpu;
   u64 dsq = band_dsq(band, target);
   struct dispatch_ctx* dctx = get_dispatch_ctx(target);
 
@@ -162,8 +164,14 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
     return;
   }
 
+  // No preemption: still kick the cpu if it is idle or about to go idle.
+  // Without that a task inserted while the target is between stopping and
+  // dispatch could be missed and wait until something else wakes that cpu.
   if (!(enq_flags & SCX_ENQ_WAKEUP) || band > running_band)
+  {
+    scx_bpf_kick_cpu(target, SCX_KICK_IDLE);
     return;
+  }
 
   bool preempt = band < running_band;
   if (!preempt)
@@ -176,6 +184,10 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   {
     dctx->preempt_pending = true;
     scx_bpf_kick_cpu(target, SCX_KICK_PREEMPT);
+  }
+  else
+  {
+    scx_bpf_kick_cpu(target, SCX_KICK_IDLE);
   }
 }
 
@@ -206,7 +218,7 @@ void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
   if (!dispatch_dsq_per_cpu(cpu, prev_band, prev_key) || !prev || !pctx || !dctx)
     return;
 
-  prev->scx.slice = SLICE_NS;
+  scx_bpf_task_set_slice(prev, SLICE_NS);
   pctx->granted_slice = SLICE_NS;
   advance_band_reference(dctx, prev_band, prev_key);
   dctx->running_band = prev_band;
@@ -221,7 +233,9 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   if (!context)
     return;
 
-  u32 cpu = bpf_get_smp_processor_id();
+  // The cpu of the task, not the executing one: renice or setaffinity from
+  // another cpu calls running/stopping remotely.
+  u32 cpu = scx_bpf_task_cpu(p);
   struct dispatch_ctx* dispatch_ctx = get_dispatch_ctx(cpu);
   if (!dispatch_ctx)
     return;
@@ -242,6 +256,7 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   context->started_at = bpf_ktime_get_ns();
   dispatch_ctx->running_since = context->started_at;
   context->granted_slice = p->scx.slice;
+  context->resume_slice = 0;
 
   kick_idle_for_waiting(cpu);
 }
@@ -254,14 +269,16 @@ void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
   if (!tctx)
     return;
 
-  struct dispatch_ctx* dctx = get_dispatch_ctx(bpf_get_smp_processor_id());
+  struct dispatch_ctx* dctx = get_dispatch_ctx(scx_bpf_task_cpu(task));
   if (!dctx)
     return;
 
   u64 used_ns = elapsed(now, tctx->started_at);
   tctx->key += used_ns;
 
-  if (dctx->preempt_pending && runnable && tctx->granted_slice > used_ns + RESUME_SLICE_MIN_NS)
+  // Only a preemption by our kick (it sets the slice to 0). An RT task taking
+  // the cpu leaves the slice and the kernel puts the task back directly.
+  if (dctx->preempt_pending && runnable && task->scx.slice == 0 && tctx->granted_slice > used_ns + RESUME_SLICE_MIN_NS)
     tctx->resume_slice = tctx->granted_slice - used_ns;
 
   dctx->preempt_pending = false;

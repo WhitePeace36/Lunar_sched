@@ -127,7 +127,7 @@ that core takes it over.
 
 ## Dispatch
 
-Each core first runs its own band 0, then a starved band if there is one, then its own
+Each core first runs a starved band if there is one, then its own band 0, then its own
 bands 1, 2, 3 and 4. After that it steals from another core of the same llc and then
 from cores of other llcs, band by band. From which core the core starts stealing is
 randomized for better load distribution.

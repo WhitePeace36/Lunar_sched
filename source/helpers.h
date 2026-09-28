@@ -100,6 +100,12 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
   return cpu_to_llc[cpu];
 }
 
+static __always_inline bool cpu_is_online(u32 cpu)
+{
+  cpu &= (MAX_CPUS - 1);
+  return cpu_online[cpu];
+}
+
 static __always_inline u64 elapsed(u64 now, u64 last)
 {
   return now > last ? now - last : 0;

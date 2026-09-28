@@ -121,20 +121,22 @@ inline std::optional<fs::path> find_cache_level_dir(const fs::path& cpu_dir, lon
   return std::nullopt;
 }
 
-// Build a grouping key for one cache level of one CPU, mirroring
-// scx_utils::get_cache_id: prefer the "id" attribute, otherwise group by
-// the "shared_cpu_list" string. nullopt means no usable info at this level.
+// Build a grouping key for one cache level of one CPU: group by the
+// "shared_cpu_list" string (the cpus that really share this cache), otherwise
+// by the "id" attribute. The id alone is not reliable: QEMU for example gives
+// every cpu its own L3 id although all of them share one L3.
+// nullopt means no usable info at this level.
 inline std::optional<std::string> cache_group_key(const fs::path& cpu_dir, long level)
 {
   const auto index_dir = find_cache_level_dir(cpu_dir, level);
   if (!index_dir)
     return std::nullopt;
 
-  if (const auto id = read_long_file(*index_dir / "id"))
-    return "l" + std::to_string(level) + ":id:" + std::to_string(*id);
-
   if (const auto shared = read_first_line(*index_dir / "shared_cpu_list"))
     return "l" + std::to_string(level) + ":shared:" + *shared;
+
+  if (const auto id = read_long_file(*index_dir / "id"))
+    return "l" + std::to_string(level) + ":id:" + std::to_string(*id);
 
   return std::nullopt;
 }
@@ -227,6 +229,7 @@ bool setup_lunar_topology(Skel* skel, const std::filesystem::path& cpu_root = "/
   for (std::uint32_t cpu = 0; cpu < topo->nr_cpu_ids; ++cpu)
   {
     skel->rodata->cpu_to_llc[cpu] = topo->cpu_to_llc[cpu];
+    skel->rodata->cpu_online[cpu] = topo->cpu_online[cpu] ? 1 : 0;
   }
 
   std::uint32_t nr_online = 0;

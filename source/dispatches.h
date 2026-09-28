@@ -20,6 +20,12 @@ static __always_inline u64 cpu_load_ahead(u32 cpu, u64 band)
   if (dctx && dctx->running_band <= band)
     load++;
 
+  // Tasks already moved to the local DSQ run next. At a slice end this is the
+  // task that replaces prev while prev is being queued again, so without it
+  // the own cpu looks one task lighter than it is and an imbalance never
+  // gets corrected.
+  load += dsq_queued(SCX_DSQ_LOCAL_ON | cpu);
+
   load += dsq_queued(band_dsq(BAND_0, cpu));
   if (band >= BAND_1)
     load += dsq_queued(band_dsq(BAND_1, cpu));
@@ -72,7 +78,7 @@ static __always_inline s32 pick_enqueue_cpu(struct task_struct* p, struct task_c
   bpf_for(i, 0, nr_cpu_ids)
   {
     u32 other = (start + i) % nr_cpu_ids;
-    if (other == cpu || cpu_llc_id(other) != my_llc)
+    if (other == cpu || cpu_llc_id(other) != my_llc || !cpu_is_online(other))
       continue;
     if (!bpf_cpumask_test_cpu(other, p->cpus_ptr))
       continue;
@@ -110,7 +116,7 @@ static __always_inline bool try_acquire_task_from_other_cpu(u64 band, u32 cpu, b
   bpf_for(i, 0, nr_cpu_ids)
   {
     u32 other = (start + i) % nr_cpu_ids;
-    if (other == cpu)
+    if (other == cpu || !cpu_is_online(other))
       continue;
     if (sameLLC && cpu_llc_id(other) != my_llc)
       continue;
@@ -250,12 +256,9 @@ static __always_inline bool dispatch_dsq_per_cpu(u32 cpu, u64 prev_band, u64 pre
   u64 now = bpf_ktime_get_ns();
   int ret;
 
-  // A queued band 0 task first, unless prev is band 0 with an earlier key.
-  if (!(prev_band == BAND_0 && (s64)(prev_key - dsq_head_key(band_dsq(BAND_0, cpu))) <= 0) && take_from_local_band(dctx, BAND_0, cpu, now))
-    return false;
-
-  // A starved band goes before prev too, otherwise a running band 0 task would
-  // never let the lower bands get their minimum.
+  // A starved band goes first, before prev and before queued band 0 tasks,
+  // otherwise two band 0 tasks taking turns would never let the lower bands
+  // get their minimum.
   if (dctx)
   {
     u64 starved = most_starved_band(dctx, cpu, now);
@@ -265,6 +268,10 @@ static __always_inline bool dispatch_dsq_per_cpu(u32 cpu, u64 prev_band, u64 pre
       return false;
     }
   }
+
+  // A queued band 0 task next, unless prev is band 0 with an earlier key.
+  if (!(prev_band == BAND_0 && (s64)(prev_key - dsq_head_key(band_dsq(BAND_0, cpu))) <= 0) && take_from_local_band(dctx, BAND_0, cpu, now))
+    return false;
 
   ret = serve_local_band(dctx, BAND_0, cpu, now, prev_band, prev_key);
   if (ret != SERVE_CONTINUE)

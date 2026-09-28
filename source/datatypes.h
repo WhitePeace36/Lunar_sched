@@ -11,6 +11,9 @@
 
 const volatile u32 nr_llcs = 1;
 const volatile u32 cpu_to_llc[MAX_CPUS] = {};
+// Set by userspace from the topology. Offline cpus have queues too, but nobody
+// serves them, so no task may ever be placed there.
+const volatile u8 cpu_online[MAX_CPUS] = {};
 
 struct task_ctx
 {
