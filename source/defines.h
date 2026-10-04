@@ -70,4 +70,10 @@
 
 #define MAX_CPUS 512
 
+// Wake boost: a task woken by a task of a better tier runs its next slice in
+// the tier of the waker. Wakeups by kernel threads don't boost by default:
+// kworkers and ksoftirqd wake ordinary processes for every finished disk read
+// and network packet, which would lift all of them ahead of the game.
+#define WAKE_BOOST_FROM_KTHREADS 0
+
 #endif  // DEFINES_H

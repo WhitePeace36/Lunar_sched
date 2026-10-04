@@ -79,6 +79,44 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
     tctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
 }
 
+// Tier the task runs in now: its own tier, or a better one for one slice after a
+// wake boost.
+static __always_inline u64 effective_tier(struct task_ctx* tctx)
+{
+  if (!tctx)
+    return DSQ_TYPE_GREEDY;
+  u64 tier = sanitize_tier(tctx->current_dsq_type);
+  if (tctx->boost_dsq_type < tier)
+    return tctx->boost_dsq_type;
+  return tier;
+}
+
+// Wake boost: called in the context of the waker. A task that wakes a task of a
+// worse tier lifts it into its own tier for the next slice, so work it waits for
+// (a helper thread, wineserver, a kworker submitting its gpu job, ...) runs
+// right away instead of behind everything in between.
+static __always_inline void apply_wake_boost(struct task_struct* p, struct task_ctx* tctx)
+{
+  // A wakeup from an interrupt runs on top of whatever task was interrupted,
+  // that task is not the waker.
+  if (!bpf_in_task())
+    return;
+
+  struct task_struct* waker = bpf_get_current_task_btf();
+  if (!waker || waker == p || (waker->flags & PF_IDLE))
+    return;
+  if (!WAKE_BOOST_FROM_KTHREADS && (waker->flags & PF_KTHREAD))
+    return;
+
+  struct task_ctx* wctx = get_task_ctx(waker);
+  if (!wctx)
+    return;
+
+  u64 waker_tier = effective_tier(wctx);
+  if (waker_tier < sanitize_tier(tctx->current_dsq_type) && waker_tier < tctx->boost_dsq_type)
+    tctx->boost_dsq_type = waker_tier;
+}
+
 static __always_inline void record_waker(struct task_struct* p, u64 now)
 {
   if (bpf_in_interrupt())
@@ -150,6 +188,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
     return -ENOMEM;
 
   tctx->current_dsq_type = DSQ_TYPE_GREEDY;
+  tctx->boost_dsq_type = DSQ_TYPE_EMPTY;
   tctx->started_at = now;
   tctx->run_acc = DUTY_INIT_RUN_NS;
   tctx->sleep_acc = 0;
@@ -182,6 +221,11 @@ void BPF_STRUCT_OPS(lunar_exit_task, struct task_struct* p, struct scx_exit_task
 s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wake_flags)
 {
   bool is_idle = false;
+  struct task_ctx* tctx = get_task_ctx(p);
+
+  if (tctx && (wake_flags & SCX_WAKE_TTWU))
+    apply_wake_boost(p, tctx);
+
   s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
   if (is_idle)
@@ -193,7 +237,14 @@ s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wa
 void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
 {
   struct task_ctx* tctx = get_task_ctx(p);
-  u64 tier = tctx ? sanitize_tier(tctx->current_dsq_type) : DSQ_TYPE_GREEDY;
+
+  // Pinned tasks skip select_cpu, for them the boost is taken here. A wakeup
+  // that got queued to the target cpu arrives here in interrupt context and is
+  // filtered out in apply_wake_boost().
+  if (tctx && (enq_flags & SCX_ENQ_WAKEUP))
+    apply_wake_boost(p, tctx);
+
+  u64 tier = effective_tier(tctx);
   u32 cpu = scx_bpf_task_cpu(p);
   u64 now = bpf_ktime_get_ns();
 
@@ -247,6 +298,8 @@ void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
     if (pctx)
     {
       u64 now = bpf_ktime_get_ns();
+      // The slice is over, a wake boost ends with it.
+      pctx->boost_dsq_type = DSQ_TYPE_EMPTY;
       duty_account(pctx, elapsed(now, pctx->started_at), 0);
       pctx->started_at = now;
       pctx->duty = task_duty(pctx);
@@ -277,7 +330,7 @@ void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
   if (!dispatch_ctx)
     return;
 
-  dispatch_ctx->current_task_dsq_type = sanitize_tier(context->current_dsq_type);
+  dispatch_ctx->current_task_dsq_type = effective_tier(context);
   dispatch_ctx->preempt_pending = false;
 
   context->started_at = bpf_ktime_get_ns();
@@ -309,6 +362,11 @@ void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
   if (dctx->preempt_pending && runnable && tctx->granted_slice > used_ns + RESUME_SLICE_MIN_NS)
     tctx->resume_slice = tctx->granted_slice - used_ns;
 
+  // The boosted slice is over, unless an LC task preempted it and the task gets
+  // the rest of it back.
+  if (!tctx->resume_slice)
+    tctx->boost_dsq_type = DSQ_TYPE_EMPTY;
+
   dctx->preempt_pending = false;
   dctx->current_task_dsq_type = DSQ_TYPE_EMPTY;
 }
@@ -325,6 +383,7 @@ void BPF_STRUCT_OPS(lunar_quiescent, struct task_struct* p, u64 deq_flags)
     return;
 
   tctx->resume_slice = 0;
+  tctx->boost_dsq_type = DSQ_TYPE_EMPTY;
   tctx->blocked_at = (deq_flags & SCX_DEQ_SLEEP) ? bpf_ktime_get_ns() : 0;
 }
 

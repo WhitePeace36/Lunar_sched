@@ -15,6 +15,8 @@ const volatile u32 cpu_to_llc[MAX_CPUS] = {};
 struct task_ctx
 {
   u64 current_dsq_type;
+  // tier the task runs in for its next slice after a wake boost (DSQ_TYPE_EMPTY: none)
+  u64 boost_dsq_type;
   u64 blocked_at;
   s64 duty;
   u64 run_acc;
