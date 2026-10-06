@@ -19,6 +19,11 @@
 
 #define SLICE_NS (1000 * NS_PER_US)
 
+// CPU time a starved tier gets per override: its tasks run one after another
+// until it is used up (or the tier is empty). One task per override isn't
+// enough: tasks that sleep right away again would use it up in microseconds.
+#define STARVE_OVERRIDE_BUDGET_NS SLICE_NS
+
 #define RESUME_SLICE_MIN_NS (50 * NS_PER_US)
 
 #define BALANCE_INTERVAL_NS (10ULL * NS_PER_MS)
@@ -75,5 +80,26 @@
 // kworkers and ksoftirqd wake ordinary processes for every finished disk read
 // and network packet, which would lift all of them ahead of the game.
 #define WAKE_BOOST_FROM_KTHREADS 0
+
+// CPU time a woken task keeps the tier of its waker for, as long as it doesn't
+// sleep before. Covers work that needs a few slices, without letting a task that
+// keeps running stay in the better tier.
+#define WAKE_BOOST_BUDGET_NS (4ULL * NS_PER_MS)
+
+// Load a cpu taken by an RT or deadline task counts as. More than one task: a
+// task of our tiers gives the cpu back after at most one slice, an RT task only
+// when it is done.
+#define RT_CPU_LOAD 2
+
+// Scheduling policies (include/uapi/linux/sched.h), not part of vmlinux.h
+#ifndef SCHED_FIFO
+#define SCHED_FIFO 1
+#endif
+#ifndef SCHED_RR
+#define SCHED_RR 2
+#endif
+#ifndef SCHED_DEADLINE
+#define SCHED_DEADLINE 6
+#endif
 
 #endif  // DEFINES_H

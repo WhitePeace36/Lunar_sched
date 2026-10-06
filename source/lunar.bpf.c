@@ -79,8 +79,7 @@ static __always_inline void update_task_dsq_type(struct task_struct* task, struc
     tctx->current_dsq_type = DSQ_TYPE_INTERACTIVE;
 }
 
-// Tier the task runs in now: its own tier, or a better one for one slice after a
-// wake boost.
+// Tier the task runs in now: its own tier, or a better one after a wake boost.
 static __always_inline u64 effective_tier(struct task_ctx* tctx)
 {
   if (!tctx)
@@ -92,9 +91,10 @@ static __always_inline u64 effective_tier(struct task_ctx* tctx)
 }
 
 // Wake boost: called in the context of the waker. A task that wakes a task of a
-// worse tier lifts it into its own tier for the next slice, so work it waits for
-// (a helper thread, wineserver, a kworker submitting its gpu job, ...) runs
-// right away instead of behind everything in between.
+// worse tier lifts it into its own tier until it sleeps again, for at most
+// WAKE_BOOST_BUDGET_NS of cpu time, so work it waits for (a helper thread,
+// wineserver, a kworker submitting its gpu job, ...) runs right away instead of
+// behind everything in between.
 static __always_inline void apply_wake_boost(struct task_struct* p, struct task_ctx* tctx)
 {
   // A wakeup from an interrupt runs on top of whatever task was interrupted,
@@ -114,7 +114,10 @@ static __always_inline void apply_wake_boost(struct task_struct* p, struct task_
 
   u64 waker_tier = effective_tier(wctx);
   if (waker_tier < sanitize_tier(tctx->current_dsq_type) && waker_tier < tctx->boost_dsq_type)
+  {
     tctx->boost_dsq_type = waker_tier;
+    tctx->boost_used = 0;
+  }
 }
 
 static __always_inline void record_waker(struct task_struct* p, u64 now)
@@ -172,6 +175,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init)
     dispatch_ctx->tier_head_ts[DSQ_TYPE_NORMAL] = now;
     dispatch_ctx->tier_head_ts[DSQ_TYPE_GREEDY] = now;
     dispatch_ctx->last_override_ts = now;
+    dispatch_ctx->override_tier = DSQ_TYPE_EMPTY;
+    dispatch_ctx->override_left = 0;
+    // rt_busy is not reset here: the sched_switch hook may already be attached
+    // and counting (nr_rt_busy), the map starts zeroed.
     dispatch_ctx->preempt_pending = false;
   }
 
@@ -189,6 +196,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lunar_init_task, struct task_struct* p, struct scx_
 
   tctx->current_dsq_type = DSQ_TYPE_GREEDY;
   tctx->boost_dsq_type = DSQ_TYPE_EMPTY;
+  tctx->boost_used = 0;
   tctx->started_at = now;
   tctx->run_acc = DUTY_INIT_RUN_NS;
   tctx->sleep_acc = 0;
@@ -228,7 +236,10 @@ s32 BPF_STRUCT_OPS(lunar_select_cpu, struct task_struct* p, s32 prev_cpu, u64 wa
 
   s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
-  if (is_idle)
+  // Run directly on the idle cpu, unless tasks of the same or a better tier are
+  // already queued there (their kick is still on the way): the local DSQ runs
+  // before them. Otherwise enqueue() queues it properly.
+  if (is_idle && cpu_load_ahead(cpu, effective_tier(tctx)) == 0)
     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SLICE_NS, 0);
 
   return cpu;
@@ -248,6 +259,12 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   u32 cpu = scx_bpf_task_cpu(p);
   u64 now = bpf_ktime_get_ns();
 
+  // A preempted task goes back to the head of its queue with the rest of its
+  // slice, unless its cpu is taken by an RT task now: then it is placed like any
+  // other.
+  if (tctx && tctx->resume_slice && cpu_taken_by_rt(cpu))
+    tctx->resume_slice = 0;
+
   if (tctx && tctx->resume_slice)
   {
     u64 slice = tctx->resume_slice;
@@ -261,6 +278,8 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   }
 
   u32 target = tctx ? (u32)pick_enqueue_cpu(p, tctx, tier, cpu, now) : cpu;
+  if (!cpu_is_online(target))
+    target = cpu;
   u64 dsq = get_cpu_dsq_from_type(tier, target);
   struct dispatch_ctx* dctx = get_dispatch_ctx(target);
 
@@ -291,6 +310,7 @@ void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
 {
   u64 prev_tier = DSQ_TYPE_EMPTY;
   struct task_ctx* pctx = NULL;
+  struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
 
   if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
   {
@@ -298,25 +318,42 @@ void BPF_STRUCT_OPS(lunar_dispatch, s32 cpu, struct task_struct* prev)
     if (pctx)
     {
       u64 now = bpf_ktime_get_ns();
-      // The slice is over, a wake boost ends with it.
-      pctx->boost_dsq_type = DSQ_TYPE_EMPTY;
-      duty_account(pctx, elapsed(now, pctx->started_at), 0);
+      u64 used = elapsed(now, pctx->started_at);
+      if (dctx)
+        charge_override(dctx, effective_tier(pctx), used);
+      // The slice is over: a wake boost ends once its budget is used up. A
+      // preemption (dispatch is called before stopping then) keeps the boost:
+      // the task gets the rest of its slice back in the boosted tier.
+      charge_wake_boost(pctx, used);
+      if (!(dctx && dctx->preempt_pending) && pctx->boost_used >= WAKE_BOOST_BUDGET_NS)
+        pctx->boost_dsq_type = DSQ_TYPE_EMPTY;
+      duty_account(pctx, used, 0);
       pctx->started_at = now;
       pctx->duty = task_duty(pctx);
       update_task_dsq_type(prev, pctx, now);
-      prev_tier = sanitize_tier(pctx->current_dsq_type);
+      prev_tier = effective_tier(pctx);
     }
   }
 
   if (dispatch_dsq_per_cpu(cpu, prev_tier) != DSQ_TYPE_EMPTY || !prev || !pctx)
     return;
 
-  prev->scx.slice = SLICE_NS;
+  // prev keeps running for a new slice, a boost left over from a preemption
+  // that didn't replace it ends here once its budget is used up.
+  if (pctx->boost_dsq_type != DSQ_TYPE_EMPTY && pctx->boost_used >= WAKE_BOOST_BUDGET_NS)
+  {
+    pctx->boost_dsq_type = DSQ_TYPE_EMPTY;
+    prev_tier = sanitize_tier(pctx->current_dsq_type);
+  }
+
+  scx_bpf_task_set_slice(prev, SLICE_NS);
   pctx->granted_slice = SLICE_NS;
 
-  struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
   if (dctx)
+  {
     dctx->current_task_dsq_type = prev_tier;
+    dctx->preempt_pending = false;
+  }
 }
 
 void BPF_STRUCT_OPS(lunar_running, struct task_struct* p)
@@ -349,22 +386,27 @@ void BPF_STRUCT_OPS(lunar_stopping, struct task_struct* task, bool runnable)
     return;
 
   u64 used_ns = elapsed(now, tctx->started_at);
+  struct dispatch_ctx* dctx = get_dispatch_ctx(scx_bpf_task_cpu(task));
+  if (dctx)
+    charge_override(dctx, effective_tier(tctx), used_ns);
+  charge_wake_boost(tctx, used_ns);
 
   duty_account(tctx, used_ns, 0);
   tctx->duty = task_duty(tctx);
 
   update_task_dsq_type(task, tctx, now);
 
-  struct dispatch_ctx* dctx = get_dispatch_ctx(bpf_get_smp_processor_id());
   if (!dctx)
     return;
 
-  if (dctx->preempt_pending && runnable && tctx->granted_slice > used_ns + RESUME_SLICE_MIN_NS)
+  // Only a preemption kick (it sets the slice to 0) gives the rest of the slice
+  // back, not a task that stops for another reason while a kick is pending.
+  if (dctx->preempt_pending && runnable && task->scx.slice == 0 && tctx->granted_slice > used_ns + RESUME_SLICE_MIN_NS)
     tctx->resume_slice = tctx->granted_slice - used_ns;
 
-  // The boosted slice is over, unless an LC task preempted it and the task gets
-  // the rest of it back.
-  if (!tctx->resume_slice)
+  // A wake boost ends when the task sleeps or its budget is used up, a
+  // preempted task keeps it for the rest of its slice.
+  if (!tctx->resume_slice && (!runnable || tctx->boost_used >= WAKE_BOOST_BUDGET_NS))
     tctx->boost_dsq_type = DSQ_TYPE_EMPTY;
 
   dctx->preempt_pending = false;
@@ -414,6 +456,39 @@ void BPF_STRUCT_OPS(lunar_runnable, struct task_struct* p, u64 enq_flags)
     tctx->duty = task_duty(tctx);
     update_task_dsq_type(p, tctx, now);
   }
+}
+
+// Every context switch: keeps track of the cpus an RT or deadline task runs on.
+// When one takes a cpu (from one of our tasks or from idle), the tasks already
+// picked for it (its local DSQ) go back through enqueue(), which sees the cpu as
+// busy and places them on another one, and an idle cpu is woken for the first
+// task waiting in its queues. Tasks in its tier queues stay: other cpus take
+// them over in dispatch (try_acquire_from_rt_cpu). (This replaces
+// ops.cpu_release, which newer kernels deprecate.)
+SEC("tp_btf/sched_switch")
+int BPF_PROG(lunar_sched_switch, bool preempt, struct task_struct* prev, struct task_struct* next, unsigned int prev_state)
+{
+  u32 cpu = bpf_get_smp_processor_id();
+  struct dispatch_ctx* dctx = get_dispatch_ctx(cpu);
+  if (!dctx)
+    return 0;
+
+  bool rt = is_rt_task(next);
+  if (rt != dctx->rt_busy)
+  {
+    dctx->rt_busy = rt;
+    if (rt)
+      __sync_fetch_and_add(&nr_rt_busy, 1);
+    else
+      __sync_fetch_and_sub(&nr_rt_busy, 1);
+  }
+  if (!rt)
+    return 0;
+
+  if (dsq_queued(SCX_DSQ_LOCAL_ON | cpu))
+    scx_bpf_reenqueue_local_from_anywhere();
+  kick_idle_for_waiting(cpu);
+  return 0;
 }
 
 SCX_OPS_DEFINE(lunar_ops,

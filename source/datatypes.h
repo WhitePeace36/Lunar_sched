@@ -11,12 +11,17 @@
 
 const volatile u32 nr_llcs = 1;
 const volatile u32 cpu_to_llc[MAX_CPUS] = {};
+// Set by userspace from the topology. Offline cpus have queues too, but nobody
+// serves them, so no task may ever be placed there.
+const volatile u8 cpu_online[MAX_CPUS] = {};
 
 struct task_ctx
 {
   u64 current_dsq_type;
   // tier the task runs in for its next slice after a wake boost (DSQ_TYPE_EMPTY: none)
   u64 boost_dsq_type;
+  // cpu time used in the boosted tier since the wakeup that boosted it
+  u64 boost_used;
   u64 blocked_at;
   s64 duty;
   u64 run_acc;
@@ -40,8 +45,17 @@ struct dispatch_ctx
   u64 current_task_dsq_type;
   u64 tier_head_ts[DSQ_TYPE_AMOUNT + 1];
   u64 last_override_ts;
+  // starvation override in progress: tier and the cpu time it has left
+  u64 override_tier;
+  u64 override_left;
+  // an RT or deadline task runs on this cpu (kept up to date by sched_switch)
+  bool rt_busy;
   bool preempt_pending;
 };
+
+// Number of cpus an RT or deadline task runs on right now. Lets dispatch skip
+// looking for such cpus when there are none.
+u64 nr_rt_busy;
 
 struct pick_scratch
 {

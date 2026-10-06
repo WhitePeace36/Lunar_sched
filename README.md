@@ -15,6 +15,9 @@ cmake clang pkgconf libbpf bpf
 
 kernel compiled with flag `CONFIG_DEBUG_INFO_BTF=y`
 
+Linux 6.18 or newer. 6.19 or newer is recommended, 6.18 loses a part of the realtime
+handling (see below).
+
 for the kernel option you can just check if `/sys/kernel/btf/vmlinux` is present.
 
 But this kernel option should be enabled by default, but not bad to check never the less.
@@ -106,12 +109,18 @@ they are classified like every other task.
 
 ## Wake boost
 
-When a task wakes a task of a worse tier, the woken task runs its next slice in the tier
-of the waker (if that is LC, it also preempts like any LC wakeup). After that slice, or
-when it goes to sleep before, it is back in its own tier. That way work a task waits for
-(a helper thread, wineserver, a kworker that submits its gpu job, ...) runs right away
-instead of behind everything in between. A task that needs more than one slice gets no
-advantage beyond that slice: it is only boosted again after it has slept and is woken
+When a task wakes a task of a worse tier, the woken task runs in the tier of the waker
+(if that is LC, it also preempts like any LC wakeup) until it goes to sleep again, for at
+most 4ms of cpu time (`WAKE_BOOST_BUDGET_NS`). After that it is back in its own tier.
+That way work a task waits for (a helper thread, wineserver, a kworker that submits its
+gpu job, ...) runs right away instead of behind everything in between. A task that keeps
+running gets no advantage beyond the budget: it is only boosted again after it has
+slept and is woken again.
+
+The budget is several slices on purpose. With a boost of only one slice, a woken task
+that needs a bit more than that falls back to its own tier with its work unfinished.
+Behind a busy better tier it then only runs on the starvation override, its next
+requests pile up while it waits, so it never sleeps and is never woken (and boosted)
 again.
 
 Only wakeups from normal task context count. A wakeup from an interrupt runs on top of
@@ -133,17 +142,50 @@ Otherwise the task goes to the queue of the core with the least work ahead of it
 - NORMAL and GREEDY tasks compare their core with 2 random cores of the same llc
   and move at most once every 10ms, which evens out long queues between busy cores
 
+Offline cores (for example the second threads with SMT off) are never used.
+
+### Realtime and deadline tasks
+
+Tasks with SCHED_FIFO, SCHED_RR or SCHED_DEADLINE (kwin, irq threads, ...) run above
+all tiers, outside of lunar. A core that runs such a task counts as busy for every
+tier, with a load of 2 tasks (`RT_CPU_LOAD`): a task of our tiers gives the core back
+after at most one slice, a realtime task only when it is done. The 10ms limit for
+moving tasks doesn't apply to tasks whose own core is taken by a realtime task.
+
+Every switch to a realtime or deadline task is seen by a `sched_switch` tracepoint.
+The tasks already picked to run next on that core then go back through placement,
+which moves them to a core that is free for them (kernel 6.19+), and an idle core is
+woken for the first task waiting in its queues. A preempted task that would resume on
+a core taken by a realtime task goes through placement too instead of going back to
+the head of its old queue.
+
+Tasks that still wait in the queues of such a core are taken over by the other cores:
+before a core runs a tier of its own, it first takes a task of that tier waiting on a
+core of its llc that is running a realtime task. When no core runs a realtime task,
+this check costs nothing.
+
+Per-cpu kernel threads with a realtime policy (migration/N, which runs for every
+affinity change and task migration) don't count as realtime tasks taking the core:
+they only run for microseconds.
+
 ## Dispatch
 
-Each core first runs its own LC tasks, then a starved tier if there is one, then
-its own INTERACTIVE, NORMAL and GREEDY tasks. After that it steals from another
-core of the same llc and then from cores of other llcs.
+Each core first runs its own LC tasks, then a starved tier if there is one. Then it
+looks at the best tier it could run itself (its running task or its own queues). If a
+task of a better tier waits on another core of the same llc, it takes that one over, so
+the tiers are strict across cores too. Otherwise it runs its own INTERACTIVE, NORMAL
+and GREEDY tasks. After that it steals from another core of the same llc and then from
+cores of other llcs.
 From which core the core starts stealing is randomized for better load distribution.
 
 ## Starvation
 
-If the head of a tier has not been served for longer than its budget. 
-It gets one slice ahead of the higher tiers, at most once every 10ms per core. The values are in `source/defines.h`.
+If the head of a tier has not been served for longer than its budget, the tier gets
+one slice (1ms, `STARVE_OVERRIDE_BUDGET_NS`) of cpu time ahead of the higher tiers, at
+most once every 10ms per core: its tasks run one after another until that time is used
+up or the tier is empty. One task per override isn't enough, tasks that sleep again
+right away would use it up in microseconds, and a cpu bound task of the tier behind
+them would never get to run. The values are in `source/defines.h`.
 
 ## CPU hotplug
 

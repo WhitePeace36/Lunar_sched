@@ -64,6 +64,51 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
   return cpu_to_llc[cpu];
 }
 
+static __always_inline bool cpu_is_online(u32 cpu)
+{
+  cpu &= (MAX_CPUS - 1);
+  return cpu_online[cpu];
+}
+
+static __always_inline bool is_percpu_kthread(const struct task_struct* p)
+{
+  return (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1;
+}
+
+static __always_inline bool is_rt_task(const struct task_struct* p)
+{
+  // Per-cpu kernel threads with an RT policy (migration/N for every affinity
+  // change and task migration, ...) only run for microseconds: they don't take
+  // the cpu away in a way worth moving tasks for.
+  if (is_percpu_kthread(p))
+    return false;
+  int policy = p->policy;
+  return policy == SCHED_FIFO || policy == SCHED_RR || policy == SCHED_DEADLINE;
+}
+
+// The cpu runs a task of a higher sched class (RT, deadline) right now. sched_ext
+// tasks don't run there until it is done, even when nothing of ours is running.
+static __always_inline bool cpu_taken_by_rt(u32 cpu)
+{
+  struct task_struct* curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+  return curr && is_rt_task(curr);
+}
+
+// Time used by a task of the tier a starvation override runs for counts
+// against the override budget.
+static __always_inline void charge_override(struct dispatch_ctx* dctx, u64 tier, u64 used)
+{
+  if (!dctx->override_left || tier != dctx->override_tier)
+    return;
+  dctx->override_left = dctx->override_left > used ? dctx->override_left - used : 0;
+}
+
+static __always_inline void charge_wake_boost(struct task_ctx* tctx, u64 used)
+{
+  if (tctx->boost_dsq_type != DSQ_TYPE_EMPTY)
+    tctx->boost_used += used;
+}
+
 static __always_inline u32 task_duty(const struct task_ctx* tctx)
 {
   return (tctx->run_acc << 10) / (tctx->run_acc + tctx->sleep_acc + 1);
